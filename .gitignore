@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+out/
+dist/
+release/
+coverage/
+*.tsbuildinfo
+
+# Bundled FFmpeg is fetched by `npm run setup:ffmpeg`, never committed.
+resources/ffmpeg/*
+!resources/ffmpeg/README.md
+!resources/ffmpeg/.gitkeep
+
+# Generated application icon
+build/icon.ico
+
+# Local scratch output from the integration test
+tests/.tmp/
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+*.log
