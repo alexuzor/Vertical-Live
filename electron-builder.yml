@@ -79,4 +79,7 @@ nsis:
 publish:
   provider: github
   owner: alexuzor
-  repo: vertical-live
+  # Must match the GitHub repo name. The actual repo is "Vertical-Live"
+  # (mixed case); GitHub resolves case-insensitively, but matching it exactly
+  # removes any doubt about the release-asset download URLs.
+  repo: Vertical-Live
