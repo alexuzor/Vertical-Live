@@ -29,6 +29,13 @@ export const PREVIEW_MAX_FRAME_BYTES = 2 * 1024 * 1024;
 export const PREVIEW_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 /** Minimum wall-clock gap between preview frames forwarded to the renderer. */
 export const PREVIEW_MIN_FRAME_INTERVAL_MS = 80;
+/**
+ * DirectShow real-time buffer for a preview-only run. Much smaller than the
+ * streaming/recording 512M: a live preview must stay current, so a momentary
+ * stall should drop stale frames rather than bank up seconds (for an MJPEG
+ * webcam, tens of seconds) of latency the viewer then has to watch through.
+ */
+export const PREVIEW_RTBUFSIZE = '64M';
 
 /** Supported streaming frame rates. */
 export const SUPPORTED_FPS = [24, 25, 30] as const;
@@ -82,6 +89,17 @@ export const RECORDING_FILENAME_PREFIX = 'Vertical-Live';
  */
 export const CAPTURE_TARGET_WIDTH = 1920;
 export const CAPTURE_TARGET_HEIGHT = 1080;
+
+/**
+ * Capture target for a preview-only run. The preview is only a 360x640
+ * thumbnail, so opening the camera at the full 1920x1080 target forces FFmpeg to
+ * decode a full-resolution frame for every captured frame — the dominant cost,
+ * and the one that makes a weak machine fall behind real time (growing lag +
+ * stutter). A small capture mode keeps decode cheap so the pipeline stays ahead;
+ * framing is aspect-based, so the composed preview looks identical.
+ */
+export const PREVIEW_CAPTURE_TARGET_WIDTH = 640;
+export const PREVIEW_CAPTURE_TARGET_HEIGHT = 480;
 
 /** How long we wait for FFmpeg to quit gracefully before escalating (ms). */
 export const GRACEFUL_STOP_TIMEOUT_MS = 8_000;

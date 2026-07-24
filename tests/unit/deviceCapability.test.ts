@@ -151,6 +151,30 @@ describe('selectCaptureMode', () => {
     const modes = [mode({ vcodec: 'mjpeg', maxWidth: 3840, maxHeight: 2160, maxFps: 30 })];
     expect(selectCaptureMode(modes, 30).width).toBe(3840);
   });
+
+  it('honours a small (preview) target instead of opening the camera at 1080p', () => {
+    const modes = [
+      mode({ vcodec: 'mjpeg', maxWidth: 1920, maxHeight: 1080, maxFps: 30 }),
+      mode({ vcodec: 'mjpeg', maxWidth: 1280, maxHeight: 720, maxFps: 30 }),
+      mode({ vcodec: 'mjpeg', maxWidth: 640, maxHeight: 480, maxFps: 30 }),
+    ];
+
+    const selection = selectCaptureMode(modes, 30, { width: 640, height: 480 });
+
+    expect(selection.width).toBe(640);
+    expect(selection.height).toBe(480);
+  });
+
+  it('picks the smallest oversized mode when nothing meets the small target', () => {
+    const modes = [
+      mode({ vcodec: 'mjpeg', maxWidth: 1920, maxHeight: 1080, maxFps: 30 }),
+      mode({ vcodec: 'mjpeg', maxWidth: 1280, maxHeight: 720, maxFps: 30 }),
+    ];
+
+    // No mode <= 640x480, so the closest (smallest) larger one wins — still far
+    // cheaper to decode than 1080p.
+    expect(selectCaptureMode(modes, 30, { width: 640, height: 480 }).width).toBe(1280);
+  });
 });
 
 describe('DeviceCapabilityService', () => {

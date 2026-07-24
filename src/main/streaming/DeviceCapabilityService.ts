@@ -89,20 +89,33 @@ function supportsFps(mode: CameraMode, fps: number): boolean {
   return mode.minFps <= fps + 0.05 && mode.maxFps >= fps - 0.05;
 }
 
+/** A landscape resolution the capture mode selection aims for. */
+export interface CaptureTarget {
+  width: number;
+  height: number;
+}
+
+const DEFAULT_CAPTURE_TARGET: CaptureTarget = {
+  width: CAPTURE_TARGET_WIDTH,
+  height: CAPTURE_TARGET_HEIGHT,
+};
+
 /** Score a mode's resolution: exact target first, then largest that fits. */
-function resolutionScore(mode: CameraMode): number {
+function resolutionScore(mode: CameraMode, target: CaptureTarget): number {
   const width = mode.maxWidth;
   const height = mode.maxHeight;
   const area = width * height;
 
-  if (width === CAPTURE_TARGET_WIDTH && height === CAPTURE_TARGET_HEIGHT) {
+  if (width === target.width && height === target.height) {
     return Number.MAX_SAFE_INTEGER;
   }
-  if (width <= CAPTURE_TARGET_WIDTH && height <= CAPTURE_TARGET_HEIGHT) {
+  if (width <= target.width && height <= target.height) {
     return area;
   }
-  // Oversized modes are usable but least preferred: they cost bandwidth and
-  // CPU for detail the 1080x1920 canvas throws away.
+  // Oversized modes are usable but least preferred: they cost bandwidth and CPU
+  // for detail the target canvas throws away. Among oversized modes the smaller
+  // one wins, so a camera with no mode at/under the target still gets its
+  // closest (smallest) larger mode rather than its biggest.
   return -area;
 }
 
@@ -112,11 +125,12 @@ export interface CaptureModeSelection extends SelectedCaptureMode {
 }
 
 /**
- * Chooses the capture mode closest to 1920x1080 that can sustain `fps`.
+ * Chooses the capture mode closest to `target` (default 1920x1080) that can
+ * sustain `fps`. Preview passes a small target so decode stays cheap.
  *
  * Falls back, in order:
- *   1. exact 1920x1080 at the requested fps
- *   2. largest mode <= 1920x1080 at the requested fps (compressed preferred)
+ *   1. exact target resolution at the requested fps
+ *   2. largest mode <= target at the requested fps (compressed preferred)
  *   3. any mode at the requested fps
  *   4. best resolution at its own maximum fps  -> reported as a substitution
  *   5. nothing (let FFmpeg pick)               -> reported as a substitution
@@ -124,6 +138,7 @@ export interface CaptureModeSelection extends SelectedCaptureMode {
 export function selectCaptureMode(
   modes: readonly CameraMode[],
   requestedFps: number,
+  target: CaptureTarget = DEFAULT_CAPTURE_TARGET,
 ): CaptureModeSelection {
   if (modes.length === 0) {
     return {
@@ -139,7 +154,7 @@ export function selectCaptureMode(
   }
 
   const compare = (a: CameraMode, b: CameraMode): number => {
-    const scoreDelta = resolutionScore(b) - resolutionScore(a);
+    const scoreDelta = resolutionScore(b, target) - resolutionScore(a, target);
     if (scoreDelta !== 0) return scoreDelta;
     // At equal resolution prefer compressed modes (USB bandwidth), then the
     // one with the higher ceiling frame rate.

@@ -23,6 +23,8 @@ import {
   NETWORK_DEGRADED_SPEED,
   NETWORK_RECOVERED_SAMPLES,
   NETWORK_RECOVERED_SPEED,
+  PREVIEW_CAPTURE_TARGET_HEIGHT,
+  PREVIEW_CAPTURE_TARGET_WIDTH,
   PREVIEW_MIN_FRAME_INTERVAL_MS,
 } from '../../shared/constants';
 import { ERROR_MESSAGES, VerticalLiveError, isRecoverable } from '../../shared/errors';
@@ -279,6 +281,9 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
       const { dshowName, captureMode } = await this.resolveCamera(
         config.cameraDevice,
         config.fps,
+        // A preview only needs a small capture mode; opening the camera at full
+        // resolution just to shrink it is what makes a weak machine fall behind.
+        { width: PREVIEW_CAPTURE_TARGET_WIDTH, height: PREVIEW_CAPTURE_TARGET_HEIGHT },
       );
       this.captureMode = captureMode;
 
@@ -527,7 +532,10 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
   }
 
   private async launchRecording(config: RecordingConfig): Promise<StartRecordingResult> {
-    const { dshowName, captureMode } = await this.resolveCamera(config.cameraDevice, config.fps);
+    const { dshowName, captureMode } = await this.resolveCamera(
+      config.cameraDevice,
+      config.fps,
+    );
     this.captureMode = captureMode;
 
     let microphoneName: string | null = null;
@@ -649,6 +657,7 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
   private async resolveCamera(
     deviceId: string,
     fps: number,
+    captureTarget?: { width: number; height: number },
   ): Promise<{ dshowName: string; captureMode: SelectedCaptureMode }> {
     if (this.syntheticInput) {
       return {
@@ -680,7 +689,7 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
 
     const dshowName = resolveDshowName(camera);
     const capabilities = await this.capabilities.get(deviceId, dshowName);
-    const selection = selectCaptureMode(capabilities.modes, fps);
+    const selection = selectCaptureMode(capabilities.modes, fps, captureTarget);
 
     if (selection.substituted && selection.note) {
       this.logger.warn(selection.note);

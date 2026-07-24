@@ -25,6 +25,7 @@ import {
   PREVIEW_FPS,
   PREVIEW_HEIGHT,
   PREVIEW_MJPEG_QUALITY,
+  PREVIEW_RTBUFSIZE,
   PREVIEW_WIDTH,
   RECORDING_AUDIO_BITRATE_KBPS,
   RECORDING_VIDEO_BITRATE_KBPS,
@@ -434,6 +435,13 @@ export interface VideoInputOptions {
    * first output and leave the others running against an endless source.
    */
   durationSeconds?: number;
+  /**
+   * Preview-only: minimise capture-side buffering (small real-time buffer,
+   * `nobuffer`) so a stall drops stale frames instead of accumulating latency.
+   * Never set for stream/record, where the 512M buffer prevents dropped frames
+   * in the output the viewer keeps.
+   */
+  lowLatency?: boolean;
 }
 
 function durationArgs(durationSeconds: number | undefined): string[] {
@@ -454,10 +462,12 @@ export function buildVideoInputArgs(options: VideoInputOptions): string[] {
   const args = [
     '-f',
     'dshow',
-    // A generous real-time buffer is the documented fix for DirectShow's
-    // "real-time buffer too full, frame dropped" warnings on USB cameras.
+    // Preview keeps latency current by dropping stale frames; stream/record use
+    // a generous buffer, the documented fix for DirectShow's "real-time buffer
+    // too full, frame dropped" warnings on USB cameras.
+    ...(options.lowLatency ? ['-fflags', 'nobuffer'] : []),
     '-rtbufsize',
-    '512M',
+    options.lowLatency ? PREVIEW_RTBUFSIZE : '512M',
     '-thread_queue_size',
     '1024',
     // DirectShow timestamps drift on many webcams; wall-clock timestamps keep
@@ -718,9 +728,15 @@ export interface BuildPreviewCommandOptions {
 export function buildPreviewCommand(options: BuildPreviewCommandOptions): string[] {
   const withAudio = options.synthetic || options.microphoneDevice !== null;
 
+  // Composite the master at the preview's own frame rate, not the (up to 60 fps)
+  // stream rate. The preview only ever shows PREVIEW_FPS, so building the full
+  // 1080x1920 canvas at the stream rate just to drop most of it downstream is
+  // wasted CPU — and when it can't keep up in real time, latency piles up in the
+  // capture buffer and the preview drifts behind. The framing geometry is
+  // resolution-based, so this changes only the cost, never what the user sees.
   const graph = buildFilterGraph(
     options.framingMode,
-    options.fps,
+    PREVIEW_FPS,
     { stream: false, recording: false, preview: true },
     { audio: false, meter: withAudio },
   );
@@ -732,6 +748,7 @@ export function buildPreviewCommand(options: BuildPreviewCommandOptions): string
       captureMode: options.captureMode,
       fps: options.fps,
       synthetic: options.synthetic,
+      lowLatency: true,
     }),
   ];
 
@@ -757,6 +774,10 @@ export function buildPreviewCommand(options: BuildPreviewCommandOptions): string
     String(PREVIEW_MJPEG_QUALITY),
     '-pix_fmt',
     'yuvj420p',
+    // Push each JPEG to the pipe the instant it is muxed instead of letting it
+    // sit in the output buffer, so the renderer sees frames without added delay.
+    '-flush_packets',
+    '1',
     '-f',
     'mjpeg',
     'pipe:1',

@@ -10,6 +10,7 @@ import {
   MASTER_WIDTH,
   PREVIEW_FPS,
   PREVIEW_HEIGHT,
+  PREVIEW_RTBUFSIZE,
   PREVIEW_WIDTH,
   STREAM_HEIGHT,
   STREAM_WIDTH,
@@ -672,6 +673,47 @@ describe('buildPreviewCommand', () => {
       synthetic: false,
     });
     expect(args.at(-1)).toBe('pipe:1');
+  });
+
+  it('composites the master at the preview frame rate, not the stream rate', () => {
+    const args = buildPreviewCommand({
+      cameraDevice: 'Cam',
+      microphoneDevice: null,
+      framingMode: 'fill',
+      fps: 60,
+      captureMode: null,
+      synthetic: false,
+    });
+    const graph = valueAfter(args, '-filter_complex') ?? '';
+    // The expensive 1080x1920 composition runs at PREVIEW_FPS, never the 60 fps
+    // the user configured for the live send.
+    expect(graph).toContain(`[0:v]fps=${PREVIEW_FPS}`);
+    expect(graph).not.toContain('fps=60');
+  });
+
+  it('caps capture buffering so the preview cannot bank up latency', () => {
+    const args = buildPreviewCommand({
+      cameraDevice: 'Cam',
+      microphoneDevice: null,
+      framingMode: 'fill',
+      fps: 30,
+      captureMode: null,
+      synthetic: false,
+    });
+    expect(valueAfter(args, '-rtbufsize')).toBe(PREVIEW_RTBUFSIZE);
+    expect(valueAfter(args, '-fflags')).toBe('nobuffer');
+  });
+
+  it('flushes each JPEG to the pipe immediately', () => {
+    const args = buildPreviewCommand({
+      cameraDevice: 'Cam',
+      microphoneDevice: null,
+      framingMode: 'fill',
+      fps: 30,
+      captureMode: null,
+      synthetic: false,
+    });
+    expect(valueAfter(args, '-flush_packets')).toBe('1');
   });
 });
 
