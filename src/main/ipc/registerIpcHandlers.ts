@@ -23,6 +23,7 @@ import {
   deviceCapabilitiesRequestSchema,
   detectEncodersRequestSchema,
   listDevicesRequestSchema,
+  meterConfigSchema,
   openFolderRequestSchema,
   previewConfigSchema,
   recordingConfigSchema,
@@ -258,6 +259,17 @@ export function registerIpcHandlers(context: IpcContext): () => void {
     }),
   );
 
+  // The audio meter is a separate process, so switching the mic or toggling
+  // monitoring here never restarts the camera preview.
+  ipcMain.handle(
+    IPC.setMeter,
+    guard(logger, 'setMeter', async (_event, payload: unknown) => {
+      const { microphoneDevice } = meterConfigSchema.parse(payload);
+      await engine.setMeter(microphoneDevice);
+      return true;
+    }),
+  );
+
   /* ---------------- Streaming ------------------ */
 
   ipcMain.handle(
@@ -396,6 +408,7 @@ export function registerIpcHandlers(context: IpcContext): () => void {
         `Camera:           ${stored.cameraDevice ?? 'none'}`,
         `Microphone:       ${stored.microphoneDevice ?? 'none'}`,
         `Audio enabled:    ${String(stored.audioEnabled)}`,
+        `Noise reduction:  ${stored.noiseSuppression ? 'on' : 'off'}`,
         `Framing:          ${stored.framingMode}`,
         `FPS:              ${String(stored.fps)}`,
         `Bitrate preset:   ${stored.bitratePreset} (${String(stored.customBitrateKbps)} kbps)`,
@@ -535,7 +548,11 @@ function probeReachability(serverUrl: string): Promise<ConnectionTestResult> {
 
     socket.setTimeout(5000);
     socket.once('connect', () =>
-      finish({ reachable: true, message: `Reachable — ${target} accepted a connection.`, target }),
+      finish({
+        reachable: true,
+        message: `Reachable — ${target} accepted a connection.`,
+        target,
+      }),
     );
     socket.once('timeout', () =>
       finish({ reachable: false, message: `Timed out reaching ${target}.`, target }),

@@ -52,6 +52,36 @@ function subscribe<T>(channel: string, handler: (payload: T) => void): Unsubscri
   };
 }
 
+/*
+ * Dedicated preview-frame transport.
+ *
+ * The main process hands over one end of a MessageChannel (once per page load).
+ * Preview JPEGs arrive here as transferred ArrayBuffers — off the ordinary IPC
+ * channel, so they never contend with commands/status — and are relayed to the
+ * single registered frame handler in the page (the canvas renderer). Frames are
+ * never queued here: the handler keeps only the newest.
+ */
+// Structural shape of the renderer MessagePort, so this file (compiled without
+// the DOM lib) need not name the DOM `MessagePort`/`MessageEvent` types.
+interface PreviewPort {
+  start(): void;
+  close(): void;
+  onmessage: ((event: { data: ArrayBuffer }) => void) | null;
+}
+
+let previewPort: PreviewPort | null = null;
+let previewFrameHandler: ((frame: Uint8Array) => void) | null = null;
+
+ipcRenderer.on(IPC.previewPort, (event: IpcRendererEvent) => {
+  previewPort?.close();
+  previewPort = (event.ports[0] as PreviewPort | undefined) ?? null;
+  if (!previewPort) return;
+  previewPort.onmessage = (message) => {
+    previewFrameHandler?.(new Uint8Array(message.data));
+  };
+  previewPort.start();
+});
+
 const api: VerticalLiveApi = {
   getAppInfo: () => ipcRenderer.invoke(IPC.getAppInfo) as Promise<AppInfo>,
 
@@ -91,6 +121,9 @@ const api: VerticalLiveApi = {
 
   stopPreview: () => ipcRenderer.invoke(IPC.stopPreview) as Promise<IpcResult<boolean>>,
 
+  setMeter: (microphoneDevice: string | null) =>
+    ipcRenderer.invoke(IPC.setMeter, { microphoneDevice }) as Promise<IpcResult<boolean>>,
+
   startStream: (config: StartStreamRequest) =>
     ipcRenderer.invoke(IPC.startStream, config) as Promise<IpcResult<StartStreamResult>>,
 
@@ -109,7 +142,9 @@ const api: VerticalLiveApi = {
     }) as Promise<SystemMetrics>,
 
   testConnection: (facebookServerUrl: string) =>
-    ipcRenderer.invoke(IPC.testConnection, { facebookServerUrl }) as Promise<ConnectionTestResult>,
+    ipcRenderer.invoke(IPC.testConnection, {
+      facebookServerUrl,
+    }) as Promise<ConnectionTestResult>,
 
   openLogFile: () => ipcRenderer.invoke(IPC.openLogFile) as Promise<IpcResult<boolean>>,
 
@@ -132,7 +167,14 @@ const api: VerticalLiveApi = {
     onStatus: (handler) => subscribe<UpdateStatus>(IPC.updateStatus, handler),
   },
 
-  onPreviewFrame: (handler) => subscribe<Uint8Array>(IPC.previewFrame, handler),
+  onPreviewFrame: (handler) => {
+    // A single consumer (the canvas renderer). Frames flow over the MessagePort,
+    // not this call, so registering just points the relay at the handler.
+    previewFrameHandler = handler;
+    return () => {
+      if (previewFrameHandler === handler) previewFrameHandler = null;
+    };
+  },
   onStreamStatus: (handler) => subscribe<StreamStatus>(IPC.streamStatus, handler),
   onStreamStats: (handler) => subscribe<StreamStats>(IPC.streamStats, handler),
   onStreamError: (handler) => subscribe<StreamErrorPayload>(IPC.streamError, handler),

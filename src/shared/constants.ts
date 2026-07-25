@@ -20,7 +20,8 @@ export const RECORDING_HEIGHT = MASTER_HEIGHT;
 /** Lightweight preview branch. Deliberately tiny to keep IPC cheap. */
 export const PREVIEW_WIDTH = 360;
 export const PREVIEW_HEIGHT = 640;
-export const PREVIEW_FPS = 10;
+/** Preview runs at a smooth-but-cheap rate, independent of the stream's fps. */
+export const PREVIEW_FPS = 15;
 /** MJPEG quality scale for the preview branch (2 = best, 31 = worst). */
 export const PREVIEW_MJPEG_QUALITY = 8;
 /** Hard ceiling on a single decoded preview frame; anything larger is discarded. */

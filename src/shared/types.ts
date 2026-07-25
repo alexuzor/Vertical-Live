@@ -28,15 +28,12 @@ export interface StreamConfig {
   recordingDirectory: string | null;
   /** Manual audio→video offset in ms (see MIN/MAX_AUDIO_SYNC_OFFSET_MS). */
   audioSyncOffsetMs: number;
+  /** Apply the real-time microphone noise-reduction chain to the sent audio. */
+  noiseSuppression: boolean;
 }
 
 export interface PreviewConfig {
   cameraDevice: string;
-  /**
-   * Microphone to open purely for the live audio meter, or null to leave the
-   * mic closed (monitoring off). Never encoded or played back during preview.
-   */
-  microphoneDevice: string | null;
   framingMode: FramingMode;
   fps: StreamFps;
 }
@@ -53,6 +50,8 @@ export interface RecordingConfig {
   recordingDirectory: string;
   /** Manual audio→video offset in ms (see MIN/MAX_AUDIO_SYNC_OFFSET_MS). */
   audioSyncOffsetMs: number;
+  /** Apply the real-time microphone noise-reduction chain to the recorded audio. */
+  noiseSuppression: boolean;
 }
 
 /**
@@ -287,6 +286,8 @@ export interface PersistedSettings {
   rememberStreamKey: boolean;
   /** Manual audio→video offset in ms (see MIN/MAX_AUDIO_SYNC_OFFSET_MS). */
   audioSyncOffsetMs: number;
+  /** Microphone noise reduction, applied to streamed and recorded audio. */
+  noiseSuppression: boolean;
   windowBounds: WindowBounds | null;
 }
 
@@ -433,6 +434,8 @@ export interface VerticalLiveApi {
   openRecordingFolder(path: string): Promise<IpcResult<boolean>>;
   startPreview(config: PreviewConfig): Promise<IpcResult<boolean>>;
   stopPreview(): Promise<IpcResult<boolean>>;
+  /** Start/switch/stop the standalone audio meter (null = stop). Never restarts video. */
+  setMeter(microphoneDevice: string | null): Promise<IpcResult<boolean>>;
   startStream(config: StartStreamRequest): Promise<IpcResult<StartStreamResult>>;
   stopStream(): Promise<IpcResult<StopResult>>;
   startRecording(config: RecordingConfig): Promise<IpcResult<StartRecordingResult>>;

@@ -19,6 +19,7 @@ export const IPC = {
   openRecordingFolder: 'vl:open-recording-folder',
   startPreview: 'vl:start-preview',
   stopPreview: 'vl:stop-preview',
+  setMeter: 'vl:set-meter',
   startStream: 'vl:start-stream',
   stopStream: 'vl:stop-stream',
   startRecording: 'vl:start-recording',
@@ -43,6 +44,8 @@ export const IPC = {
 
   /* Main -> renderer (send) */
   windowMaximizedChanged: 'vl:window-maximized-changed',
+  /** One-time handoff of the dedicated MessagePort that carries preview frames. */
+  previewPort: 'vl:preview-port',
   previewFrame: 'vl:preview-frame',
   streamStatus: 'vl:stream-status',
   streamStats: 'vl:stream-stats',

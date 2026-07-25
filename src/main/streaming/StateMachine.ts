@@ -11,16 +11,16 @@ import type { ApplicationState } from '../../shared/types';
 
 /** Legal transitions. Anything not listed is rejected. */
 const TRANSITIONS: Record<ApplicationState, readonly ApplicationState[]> = {
-  idle: ['discovering-devices', 'preview-starting', 'stream-starting', 'recording-starting', 'error'],
-  'discovering-devices': ['idle', 'error'],
-  'preview-starting': ['previewing', 'idle', 'error'],
-  previewing: [
-    'idle',
+  idle: [
+    'discovering-devices',
+    'preview-starting',
     'stream-starting',
     'recording-starting',
-    'preview-starting',
     'error',
   ],
+  'discovering-devices': ['idle', 'error'],
+  'preview-starting': ['previewing', 'idle', 'error'],
+  previewing: ['idle', 'stream-starting', 'recording-starting', 'preview-starting', 'error'],
   'stream-starting': ['streaming', 'stream-stopping', 'finalising-recording', 'idle', 'error'],
   streaming: ['stream-stopping', 'error'],
   'stream-stopping': ['finalising-recording', 'idle', 'error'],

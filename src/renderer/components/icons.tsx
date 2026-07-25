@@ -15,7 +15,12 @@ export interface IconProps extends SVGProps<SVGSVGElement> {
   strokeWidth?: number;
 }
 
-function Svg({ size = 18, strokeWidth = 2, children, ...rest }: IconProps & { children: React.ReactNode }) {
+function Svg({
+  size = 18,
+  strokeWidth = 2,
+  children,
+  ...rest
+}: IconProps & { children: React.ReactNode }) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"

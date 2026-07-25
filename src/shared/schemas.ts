@@ -90,9 +90,13 @@ export const audioSyncOffsetMsSchema = z
 
 export const previewConfigSchema = z.object({
   cameraDevice: deviceIdSchema,
-  microphoneDevice: deviceIdSchema.nullable(),
   framingMode: framingModeSchema,
   fps: streamFpsSchema,
+});
+
+/** The standalone preview audio meter: a microphone to monitor, or null to stop. */
+export const meterConfigSchema = z.object({
+  microphoneDevice: deviceIdSchema.nullable(),
 });
 
 export const streamConfigSchema = z.object({
@@ -106,6 +110,7 @@ export const streamConfigSchema = z.object({
   recordingEnabled: z.boolean(),
   recordingDirectory: recordingDirectorySchema.nullable(),
   audioSyncOffsetMs: audioSyncOffsetMsSchema,
+  noiseSuppression: z.boolean(),
 });
 
 /** Recording cannot be enabled without somewhere to write to. */
@@ -124,6 +129,7 @@ export const recordingConfigSchema = z.object({
   fps: streamFpsSchema,
   recordingDirectory: recordingDirectorySchema,
   audioSyncOffsetMs: audioSyncOffsetMsSchema,
+  noiseSuppression: z.boolean(),
 });
 
 export const testConnectionRequestSchema = z.object({
@@ -156,6 +162,7 @@ export const persistedSettingsSchema = z.object({
   recordingDirectory: recordingDirectorySchema.nullable(),
   rememberStreamKey: z.boolean(),
   audioSyncOffsetMs: audioSyncOffsetMsSchema,
+  noiseSuppression: z.boolean(),
   windowBounds: windowBoundsSchema.nullable(),
 });
 
@@ -182,6 +189,7 @@ export const DEFAULT_SETTINGS: PersistedSettings = {
   recordingDirectory: null,
   rememberStreamKey: true,
   audioSyncOffsetMs: 0,
+  noiseSuppression: false,
   windowBounds: null,
 };
 

@@ -1699,13 +1699,11 @@ button {
 }
 .modal--red {
   background:
-    radial-gradient(circle at 50% 0%, rgba(239, 37, 45, 0.06), transparent 42%),
-    #0a1620;
+    radial-gradient(circle at 50% 0%, rgba(239, 37, 45, 0.06), transparent 42%), #0a1620;
 }
 .modal--green {
   background:
-    radial-gradient(circle at 50% 0%, rgba(23, 205, 100, 0.06), transparent 42%),
-    #0a1620;
+    radial-gradient(circle at 50% 0%, rgba(23, 205, 100, 0.06), transparent 42%), #0a1620;
 }
 @keyframes modal-enter {
   from {
@@ -1747,11 +1745,13 @@ button {
 }
 .modal__icon--red {
   color: #ff343d;
-  filter: drop-shadow(0 0 7px rgba(255, 45, 55, 0.46)) drop-shadow(0 0 18px rgba(255, 45, 55, 0.16));
+  filter: drop-shadow(0 0 7px rgba(255, 45, 55, 0.46))
+    drop-shadow(0 0 18px rgba(255, 45, 55, 0.16));
 }
 .modal__icon--green {
   color: var(--green-bright);
-  filter: drop-shadow(0 0 7px rgba(23, 205, 100, 0.42)) drop-shadow(0 0 18px rgba(23, 205, 100, 0.16));
+  filter: drop-shadow(0 0 7px rgba(23, 205, 100, 0.42))
+    drop-shadow(0 0 18px rgba(23, 205, 100, 0.16));
 }
 
 .modal__title {
@@ -1864,6 +1864,25 @@ button {
 }
 .toast__icon {
   display: inline-flex;
+}
+
+/* Development-only build stamp: unobtrusive, non-interactive, always on top. */
+.dev-badge {
+  position: fixed;
+  left: 8px;
+  bottom: 6px;
+  z-index: 2000;
+  padding: 3px 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  color: var(--amber-bright);
+  background: rgba(6, 11, 16, 0.72);
+  border: 1px solid var(--amber-line);
+  border-radius: 6px;
+  pointer-events: none;
+  user-select: none;
+  opacity: 0.72;
 }
 
 /* ---- Auto-update banner ---- */

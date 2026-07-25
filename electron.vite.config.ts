@@ -1,8 +1,32 @@
+import { execSync } from 'node:child_process';
 import { resolve } from 'node:path';
 
 import react from '@vitejs/plugin-react';
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
 import type { Plugin } from 'vite';
+
+/**
+ * Build stamp, compiled into main and renderer so a running app can prove which
+ * source it came from. `git describe` gives a short SHA (with `-dirty` when the
+ * tree has uncommitted changes); a CI override wins when set.
+ */
+function gitRevision(): string {
+  if (process.env.VL_BUILD_REV) return process.env.VL_BUILD_REV;
+  try {
+    return execSync('git describe --always --dirty --abbrev=8', {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .toString()
+      .trim();
+  } catch {
+    return 'unknown';
+  }
+}
+
+const BUILD_DEFINE = {
+  __BUILD_REV__: JSON.stringify(gitRevision()),
+  __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+};
 
 /**
  * Content Security Policy for the renderer.
@@ -67,6 +91,7 @@ export default defineConfig({
     // `dependencies`. Everything else (zod, etc.) stays a devDependency and is
     // bundled, so the app remains "out/ + package.json + electron-updater".
     plugins: [externalizeDepsPlugin()],
+    define: BUILD_DEFINE,
     build: {
       outDir: 'out/main',
       // Deliberately unminified: source maps are excluded from the installer,
@@ -104,6 +129,7 @@ export default defineConfig({
   },
   renderer: {
     root: resolve(__dirname, 'src/renderer'),
+    define: BUILD_DEFINE,
     build: {
       outDir: resolve(__dirname, 'out/renderer'),
       // The renderer is pure UI and reports failures through the app's own

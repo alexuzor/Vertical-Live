@@ -174,8 +174,8 @@ export function BootScreen({ onReady }: { onReady: () => void }) {
       </div>
 
       <footer className="boot__foot">
-        RTMP Ready <span className="dot-sep">•</span> 1080 × 1920 <span className="dot-sep">•</span>{' '}
-        Facebook Vertical Streaming
+        RTMP Ready <span className="dot-sep">•</span> 1080 × 1920{' '}
+        <span className="dot-sep">•</span> Facebook Vertical Streaming
       </footer>
     </div>
   );

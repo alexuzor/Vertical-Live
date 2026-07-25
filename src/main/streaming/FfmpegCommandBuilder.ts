@@ -20,16 +20,16 @@ import {
   AUDIO_CHANNELS,
   AUDIO_SAMPLE_RATE,
   KEYFRAME_INTERVAL_SECONDS,
-  MASTER_HEIGHT,
-  MASTER_WIDTH,
   PREVIEW_FPS,
   PREVIEW_HEIGHT,
   PREVIEW_MJPEG_QUALITY,
   PREVIEW_RTBUFSIZE,
   PREVIEW_WIDTH,
   RECORDING_AUDIO_BITRATE_KBPS,
+  RECORDING_HEIGHT,
   RECORDING_VIDEO_BITRATE_KBPS,
   RECORDING_VIDEO_MAXRATE_KBPS,
+  RECORDING_WIDTH,
   STREAM_AUDIO_BITRATE_KBPS,
   STREAM_HEIGHT,
   STREAM_WIDTH,
@@ -121,30 +121,50 @@ export function calculateBufsizeKbps(bitrateKbps: number): number {
 /* ------------------------------------------------------------------ */
 
 /**
- * Scaling half of the master composition.
+ * A single, exact centre crop of the source to the portrait 9:16 aspect.
  *
- * `fill` scales until the 1080x1920 canvas is covered, then centre-crops.
- * `fit` scales the whole frame inside the canvas and pads with black.
+ * `min()` picks the largest 9:16 rectangle that fits the source, so nothing is
+ * cropped that the aspect change does not strictly require — and a source that
+ * is already 9:16 (a portrait camera) is left untouched. `floor(../2)*2` keeps
+ * both sides even for yuv420p. crop centres by default.
  *
- * `force_divisible_by=2` keeps the intermediate frame even in both dimensions,
- * which yuv420p requires.
+ * Cropping *first* — rather than scaling the source up to cover 1080x1920 and
+ * cropping the oversized result — means no large intermediate frame is built per
+ * tick. That oversized intermediate is what made the preview fall behind real
+ * time. 9:16 is the reduced form of the master canvas (1080:1920).
  */
-export function buildFramingFilter(
-  mode: FramingMode,
-  width = MASTER_WIDTH,
-  height = MASTER_HEIGHT,
-): string {
+export function buildPortraitCropFilter(): string {
+  return `crop=w='floor(min(iw\\,ih*9/16)/2)*2':h='floor(min(ih\\,iw*16/9)/2)*2'`;
+}
+
+/**
+ * Per-branch framing to an exact output size.
+ *
+ * `fill` assumes the master was already cropped to 9:16 by
+ * {@link buildPortraitCropFilter}, so the branch is a plain scale — identical
+ * framing for preview, stream and recording. `fit` preserves the whole
+ * (uncropped) frame, scaling it to fit inside the branch and padding black.
+ */
+export function buildBranchScale(mode: FramingMode, width: number, height: number): string {
   if (mode === 'fill') {
-    return (
-      `scale=${width}:${height}:force_original_aspect_ratio=increase:force_divisible_by=2` +
-      `,crop=${width}:${height}`
-    );
+    return `scale=${width}:${height}`;
   }
   return (
     `scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2` +
     `,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black`
   );
 }
+
+/**
+ * Real-time microphone noise reduction, inserted before the audio is split to
+ * the stream and recording encoders, so both hear the cleaned signal. Model-free
+ * and conservative, so it runs on the bundled FFmpeg on any machine and does not
+ * over-process the voice:
+ *   highpass  — removes low-frequency rumble (HVAC, desk thumps, handling)
+ *   afftdn    — gentle FFT noise-floor reduction that preserves speech
+ *   alimiter  — catches any residual peak so the cleaned audio never clips
+ */
+export const NOISE_REDUCTION_CHAIN = 'highpass=f=90,afftdn=nf=-25,alimiter=limit=0.95';
 
 export interface FilterGraphBranches {
   stream: boolean;
@@ -176,13 +196,16 @@ export function buildFilterGraph(
   mode: FramingMode,
   fps: number,
   branches: FilterGraphBranches,
-  options: { audio: boolean; meter?: boolean } = { audio: true },
+  options: { audio: boolean; meter?: boolean; noiseSuppression?: boolean } = { audio: true },
 ): FilterGraphResult {
   const chains: string[] = [];
 
-  // Master composition: rate-limit first (cheapest), then frame, then normalise
-  // pixel aspect ratio and pixel format once for every downstream branch.
-  chains.push(`[0:v]fps=${fps},${buildFramingFilter(mode)},setsar=1,format=yuv420p[master]`);
+  // Master: rate-limit first (cheapest). In fill mode apply the single exact 9:16
+  // crop here, so every branch shares byte-identical framing and no branch crops
+  // again. In fit mode the whole frame is kept and each branch pads instead.
+  // Normalise pixel aspect ratio and pixel format once for every branch.
+  const masterCrop = mode === 'fill' ? `${buildPortraitCropFilter()},` : '';
+  chains.push(`[0:v]fps=${fps},${masterCrop}setsar=1,format=yuv420p[master]`);
 
   const active: (keyof FilterGraphBranches)[] = [];
   if (branches.stream) active.push('stream');
@@ -212,20 +235,24 @@ export function buildFilterGraph(
   };
 
   if (branches.stream) {
-    chains.push(`[${splitLabels.stream}]scale=${STREAM_WIDTH}:${STREAM_HEIGHT}[v_stream]`);
+    chains.push(
+      `[${splitLabels.stream}]${buildBranchScale(mode, STREAM_WIDTH, STREAM_HEIGHT)}[v_stream]`,
+    );
     labels.stream = 'v_stream';
   }
 
   if (branches.recording) {
-    // Already 1080x1920 yuv420p; `null` is a zero-cost pass-through that gives
-    // the branch a stable, mappable label.
-    chains.push(`[${splitLabels.recording}]null[v_record]`);
+    chains.push(
+      `[${splitLabels.recording}]${buildBranchScale(mode, RECORDING_WIDTH, RECORDING_HEIGHT)}[v_record]`,
+    );
     labels.recording = 'v_record';
   }
 
   if (branches.preview) {
+    // The preview always runs at PREVIEW_FPS, even when the master is composed at
+    // the (higher) stream rate while streaming/recording — it never needs more.
     chains.push(
-      `[${splitLabels.preview}]fps=${PREVIEW_FPS},scale=${PREVIEW_WIDTH}:${PREVIEW_HEIGHT}[v_preview]`,
+      `[${splitLabels.preview}]fps=${PREVIEW_FPS},${buildBranchScale(mode, PREVIEW_WIDTH, PREVIEW_HEIGHT)}[v_preview]`,
     );
     labels.preview = 'v_preview';
   }
@@ -240,9 +267,12 @@ export function buildFilterGraph(
   const wantMeter = options.meter === true;
 
   if (audioConsumers.length > 0 || wantMeter) {
+    // Noise reduction runs once, upstream of the split, so the stream and
+    // recording encoders both receive the cleaned audio.
+    const denoise = options.noiseSuppression ? `,${NOISE_REDUCTION_CHAIN}` : '';
     const normalise =
       `[1:a]aresample=async=1000:first_pts=0,` +
-      `aformat=sample_fmts=fltp:sample_rates=${AUDIO_SAMPLE_RATE}:channel_layouts=stereo`;
+      `aformat=sample_fmts=fltp:sample_rates=${AUDIO_SAMPLE_RATE}:channel_layouts=stereo${denoise}`;
 
     // Every label the normalised audio must feed: the encoder branch(es) first,
     // then the meter tap.
@@ -577,6 +607,8 @@ export interface BuildStreamCommandOptions {
   synthetic: boolean;
   /** Manual audio→video sync offset in ms. */
   audioSyncOffsetMs: number;
+  /** Apply the noise-reduction chain to the audio. Defaults to off. */
+  noiseSuppression?: boolean;
   /** Stop after this many seconds. Used by the integration test only. */
   durationSeconds?: number;
 }
@@ -632,7 +664,7 @@ export function buildStreamCommand(options: BuildStreamCommandOptions): string[]
       recording: options.recordingPath !== null,
       preview: options.preview,
     },
-    { audio: audioEnabled, meter: withMeter },
+    { audio: audioEnabled, meter: withMeter, noiseSuppression: options.noiseSuppression },
   );
 
   const args: string[] = [...buildGlobalArgs()];
@@ -709,8 +741,6 @@ export function buildStreamCommand(options: BuildStreamCommandOptions): string[]
 
 export interface BuildPreviewCommandOptions {
   cameraDevice: string | null;
-  /** When set (or in synthetic mode), the mic is opened so the meter is live. */
-  microphoneDevice: string | null;
   framingMode: FramingMode;
   fps: StreamFps;
   captureMode: SelectedCaptureMode | null;
@@ -718,30 +748,25 @@ export interface BuildPreviewCommandOptions {
 }
 
 /**
- * Preview-only invocation used while the user is still configuring.
+ * Preview-only invocation used while the user is still configuring — camera only.
  *
- * It composes exactly the same 1080x1920 master as a live send, so the framing
- * the user sees is the framing Facebook will receive. When a microphone is
- * selected the mic is opened purely to drive the live audio meter (ebur128 into
- * a discarded null sink); the audio is never encoded or played back here.
+ * It applies the same framing (the single 9:16 crop, or fit-pad) a live send
+ * would, so what the user sees is what Facebook/the recording will receive — but
+ * composed straight to the tiny 360x640 preview at PREVIEW_FPS, never the full
+ * 1080x1920 master, so it stays real-time on modest hardware. No microphone is
+ * opened here: the audio meter runs as a separate process (see
+ * {@link buildMeterCommand}) so changing the mic or toggling the meter never
+ * disturbs the video preview.
  */
 export function buildPreviewCommand(options: BuildPreviewCommandOptions): string[] {
-  const withAudio = options.synthetic || options.microphoneDevice !== null;
-
-  // Composite the master at the preview's own frame rate, not the (up to 60 fps)
-  // stream rate. The preview only ever shows PREVIEW_FPS, so building the full
-  // 1080x1920 canvas at the stream rate just to drop most of it downstream is
-  // wasted CPU — and when it can't keep up in real time, latency piles up in the
-  // capture buffer and the preview drifts behind. The framing geometry is
-  // resolution-based, so this changes only the cost, never what the user sees.
   const graph = buildFilterGraph(
     options.framingMode,
     PREVIEW_FPS,
     { stream: false, recording: false, preview: true },
-    { audio: false, meter: withAudio },
+    { audio: false },
   );
 
-  const args: string[] = [
+  return [
     ...buildGlobalArgs(),
     ...buildVideoInputArgs({
       deviceName: options.cameraDevice,
@@ -750,21 +775,9 @@ export function buildPreviewCommand(options: BuildPreviewCommandOptions): string
       synthetic: options.synthetic,
       lowLatency: true,
     }),
-  ];
-
-  if (withAudio) {
-    args.push(
-      ...buildAudioInputArgs({
-        deviceName: options.microphoneDevice,
-        synthetic: options.synthetic,
-      }),
-    );
-  }
-
-  args.push(
     '-filter_complex',
     graph.filterComplex,
-    // Output 0: the MJPEG preview image on stdout.
+    // The MJPEG preview image on stdout.
     '-map',
     `[${graph.labels.preview}]`,
     '-an',
@@ -781,14 +794,41 @@ export function buildPreviewCommand(options: BuildPreviewCommandOptions): string
     '-f',
     'mjpeg',
     'pipe:1',
-  );
+  ];
+}
 
-  // Output 1: metering sink — ebur128 measurement discarded to null.
-  if (graph.labels.meter) {
-    args.push('-map', `[${graph.labels.meter}]`, '-f', 'null', '-');
-  }
+export interface BuildMeterCommandOptions {
+  /** Microphone device name, or null in synthetic mode (a sine source stands in). */
+  microphoneDevice: string | null;
+  synthetic: boolean;
+}
 
-  return args;
+/**
+ * Standalone, microphone-only audio meter for the configuring (preview) phase.
+ *
+ * The mic is run through ebur128 and the audio is discarded to a null sink; the
+ * per-100ms loudness measurement ebur128 prints to stderr drives the UI level
+ * meter (parsed by AudioLevelParser, exactly as for the in-pipeline meter). It is
+ * a separate process from the camera preview on purpose: changing the mic or
+ * toggling monitoring restarts only this, never the video.
+ */
+export function buildMeterCommand(options: BuildMeterCommandOptions): string[] {
+  return [
+    ...buildGlobalArgs(),
+    ...buildAudioInputArgs({
+      deviceName: options.microphoneDevice,
+      synthetic: options.synthetic,
+    }),
+    '-filter_complex',
+    `[0:a]aresample=async=1000:first_pts=0,` +
+      `aformat=sample_fmts=fltp:sample_rates=${AUDIO_SAMPLE_RATE}:channel_layouts=stereo,` +
+      `ebur128=peak=true[a_meter]`,
+    '-map',
+    '[a_meter]',
+    '-f',
+    'null',
+    '-',
+  ];
 }
 
 export interface BuildRecordingCommandOptions {
@@ -805,6 +845,8 @@ export interface BuildRecordingCommandOptions {
   synthetic: boolean;
   /** Manual audio→video sync offset in ms. */
   audioSyncOffsetMs: number;
+  /** Apply the noise-reduction chain to the audio. Defaults to off. */
+  noiseSuppression?: boolean;
   /** Stop after this many seconds. Used by tests only. */
   durationSeconds?: number;
 }
@@ -823,7 +865,7 @@ export function buildRecordingCommand(options: BuildRecordingCommandOptions): st
     options.framingMode,
     options.fps,
     { stream: false, recording: true, preview: options.preview },
-    { audio: true, meter: withMeter },
+    { audio: true, meter: withMeter, noiseSuppression: options.noiseSuppression },
   );
 
   const args: string[] = [...buildGlobalArgs()];

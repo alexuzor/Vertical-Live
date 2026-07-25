@@ -14,7 +14,10 @@ export interface ConfirmationContent {
 export const confirmationContent: Record<ConfirmationDialogVariant, ConfirmationContent> = {
   'stop-stream': {
     title: 'Stop live stream?',
-    message: ['Your current live stream session will end.', 'You can start a new stream anytime.'],
+    message: [
+      'Your current live stream session will end.',
+      'You can start a new stream anytime.',
+    ],
     cancelLabel: 'Cancel',
     confirmLabel: 'Stop Stream',
     busyLabel: 'Stopping…',

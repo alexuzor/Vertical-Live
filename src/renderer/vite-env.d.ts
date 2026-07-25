@@ -16,3 +16,13 @@ declare module '*.svg' {
   const src: string;
   export default src;
 }
+
+/** The subset of Vite's `import.meta.env` the renderer relies on. */
+interface ImportMetaEnv {
+  readonly DEV: boolean;
+  readonly PROD: boolean;
+  readonly MODE: string;
+}
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}

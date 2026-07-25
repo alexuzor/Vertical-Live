@@ -41,7 +41,9 @@ export function ActionsBar() {
         disabled={streamActive}
         onClick={() => void d.toggleRecording()}
       />
-      <p className="actions__hint">Stream or record — the camera runs one pipeline at a time.</p>
+      <p className="actions__hint">
+        Stream or record — the camera runs one pipeline at a time.
+      </p>
     </div>
   );
 }

@@ -84,6 +84,21 @@ export function DevicesPanel() {
           </div>
         </div>
 
+        <div className="field devices__monitoring">
+          <span className="field__label">
+            Noise Cancellation
+            <span className="field__hint">cleans the streamed &amp; recorded mic audio</span>
+          </span>
+          <div className="monitoring">
+            <ToggleSwitch
+              checked={d.noiseSuppression}
+              onChange={d.setNoiseSuppression}
+              ariaLabel="Noise cancellation"
+            />
+            <span className="monitoring__label">{d.noiseSuppression ? 'On' : 'Off'}</span>
+          </div>
+        </div>
+
         <div className="field devices__sync">
           <span className="field__label">
             A/V Sync Offset

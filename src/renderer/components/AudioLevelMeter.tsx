@@ -38,7 +38,11 @@ export function AudioLevelMeter({ active, level }: { active: boolean; level?: nu
       className={`meter${active ? '' : ' meter--off'}`}
       role="img"
       aria-label={
-        active ? (hasSignal ? 'Audio input level' : 'Audio monitoring armed') : 'Audio monitoring off'
+        active
+          ? hasSignal
+            ? 'Audio input level'
+            : 'Audio monitoring armed'
+          : 'Audio monitoring off'
       }
       title={
         active

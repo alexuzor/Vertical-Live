@@ -34,7 +34,15 @@ interface MenuPos {
   placement: 'below' | 'above';
 }
 
-export function Dropdown({ id, value, options, onChange, icon, ariaLabel, disabled }: DropdownProps) {
+export function Dropdown({
+  id,
+  value,
+  options,
+  onChange,
+  icon,
+  ariaLabel,
+  disabled,
+}: DropdownProps) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<MenuPos | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -70,13 +78,10 @@ export function Dropdown({ id, value, options, onChange, icon, ariaLabel, disabl
     setOpen(true);
   }, [computePos, disabled, selectedIndex]);
 
-  const close = useCallback(
-    (returnFocus = true) => {
-      setOpen(false);
-      if (returnFocus) triggerRef.current?.focus();
-    },
-    [],
-  );
+  const close = useCallback((returnFocus = true) => {
+    setOpen(false);
+    if (returnFocus) triggerRef.current?.focus();
+  }, []);
 
   const choose = useCallback(
     (index: number) => {

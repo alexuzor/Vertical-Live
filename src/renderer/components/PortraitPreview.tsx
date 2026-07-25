@@ -4,18 +4,26 @@
  * is chosen directly on the preview via icon toggles, top-left.
  */
 
+import { useRef } from 'react';
+
 import cameraUrl from '../assets/camera.png';
 import { useDashboard } from '../hooks/useDashboard';
-import { useLivePreviewFrame } from '../hooks/useLivePreviewFrame';
+import { usePreviewCanvas } from '../hooks/usePreviewCanvas';
+import { queryFlag } from '../lib/api';
 
 import { IconFill, IconFit } from './icons';
 
+// Browser-only demo affordance: `?preview` forces the canvas on so the render
+// path can be exercised without Electron. Never affects the packaged app.
+const PREVIEW_DEMO = import.meta.env.DEV && queryFlag('preview') !== null;
+
 export function PortraitPreview() {
   const d = useDashboard();
-  const active = d.previewState === 'active';
+  const active = d.previewState === 'active' || PREVIEW_DEMO;
   const live = d.streamState === 'streaming' || d.streamState === 'connecting';
   const rec = d.recordingState === 'recording' || d.recordingState === 'finalising';
-  const frameUrl = useLivePreviewFrame(active);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  usePreviewCanvas(canvasRef, active);
 
   return (
     <section className="panel panel__pad preview" aria-label="Vertical preview">
@@ -23,16 +31,14 @@ export function PortraitPreview() {
 
       <div className="preview__stage">
         <div className="preview__viewport">
-          {active && frameUrl ? (
-            <img
-              className="preview__media"
-              src={frameUrl}
-              alt="Live camera preview"
-              draggable={false}
-            />
-          ) : active ? (
-            <div className="preview__media" aria-hidden="true" style={activeFill} />
-          ) : null}
+          {/* Frames are painted imperatively onto this canvas (never React state);
+              hidden until the first frame so the empty state shows through. */}
+          <canvas
+            ref={canvasRef}
+            className="preview__media"
+            aria-label="Live camera preview"
+            style={{ display: active ? 'block' : 'none' }}
+          />
 
           <div className="preview__framing" role="group" aria-label="Framing mode">
             <button
@@ -77,7 +83,3 @@ export function PortraitPreview() {
     </section>
   );
 }
-
-const activeFill: React.CSSProperties = {
-  background: 'radial-gradient(120% 80% at 30% 20%, #1a2733 0%, #0c151d 55%, #060b10 100%)',
-};

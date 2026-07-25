@@ -8,7 +8,12 @@ export function Toast() {
   const { toast } = useDashboard();
   if (!toast) return null;
   return (
-    <div className={`toast toast--${toast.tone}`} role="status" aria-live="polite" key={toast.id}>
+    <div
+      className={`toast toast--${toast.tone}`}
+      role="status"
+      aria-live="polite"
+      key={toast.id}
+    >
       <span className="toast__icon">
         <IconCheckCircle size={16} />
       </span>

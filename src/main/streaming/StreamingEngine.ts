@@ -62,6 +62,7 @@ import {
 import type { StreamDestination } from './FfmpegCommandBuilder';
 import {
   buildFacebookUrl,
+  buildMeterCommand,
   buildPreviewCommand,
   buildRecordingCommand,
   buildStreamCommand,
@@ -142,6 +143,11 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
   private readonly userDataPath: string;
 
   private run: ActiveRun | null = null;
+  // The audio meter is a separate, mic-only process that runs alongside the
+  // camera preview while configuring, so changing the mic or toggling monitoring
+  // never restarts the video. It is independent of the state machine.
+  private meterProcess: FfmpegProcess | null = null;
+  private meterDeviceId: string | null = null;
   private phase: StreamPhase = 'idle';
   private streamingSince: number | null = null;
   private recordingSince: number | null = null;
@@ -258,8 +264,9 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
   /* ---------------------------------------------------------------- */
 
   /**
-   * Starts a preview-only FFmpeg run. Uses the same master composition as a
-   * live send so what the user sees is exactly what Facebook would receive.
+   * Starts a camera-only preview run. Applies the exact framing a live send
+   * would, so the user sees what Facebook/the recording will receive. The audio
+   * meter is a separate process (see {@link setMeter}) so it never restarts this.
    */
   async startPreview(config: PreviewConfig): Promise<void> {
     if (this.run?.kind === 'stream') {
@@ -287,37 +294,98 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
       );
       this.captureMode = captureMode;
 
-      // The mic is opened only to drive the live audio meter; a missing mic is
-      // not fatal to a preview, so a lookup failure just disables metering.
-      let microphoneName: string | null = null;
-      if (config.microphoneDevice && !this.syntheticInput) {
-        const microphone = await this.discovery.findMicrophone(config.microphoneDevice);
-        if (microphone) {
-          microphoneName = resolveDshowName(microphone);
-        } else {
-          this.logger.warn(
-            `Preview meter: microphone "${config.microphoneDevice}" not found; metering disabled.`,
-          );
-        }
-      }
-
       const args = buildPreviewCommand({
         cameraDevice: this.syntheticInput ? null : dshowName,
-        microphoneDevice: this.syntheticInput ? null : microphoneName,
         framingMode: config.framingMode,
         fps: config.fps,
         captureMode,
         synthetic: this.syntheticInput,
       });
 
-      this.logger.info(
-        `Starting preview (${config.framingMode}, ${config.fps} fps` +
-          `${microphoneName ? ', metering' : ''}).`,
-      );
+      this.logger.info(`Starting preview (${config.framingMode}, ${config.fps} fps).`);
       this.spawnRun('preview', args, null, null, captureMode, null);
     } catch (error) {
       this.machine.forceTransition('idle');
       throw error;
+    }
+  }
+
+  /**
+   * Starts, switches or stops the standalone audio meter, independently of the
+   * video preview. Pass a microphone id to monitor it; pass null to stop.
+   * Idempotent for the device already being metered, so re-renders never churn
+   * the process. Never touches the camera preview.
+   */
+  async setMeter(microphoneDeviceId: string | null): Promise<void> {
+    if (microphoneDeviceId === null) {
+      await this.stopMeter();
+      return;
+    }
+    // Already metering this exact device: nothing to restart.
+    if (this.meterProcess && this.meterDeviceId === microphoneDeviceId) return;
+
+    await this.stopMeter();
+
+    let microphoneName: string | null = null;
+    if (!this.syntheticInput) {
+      const microphone = await this.discovery.findMicrophone(microphoneDeviceId);
+      if (!microphone) {
+        this.logger.warn(
+          `Audio meter: microphone "${redact(microphoneDeviceId)}" not found; metering off.`,
+        );
+        return;
+      }
+      microphoneName = resolveDshowName(microphone);
+    }
+
+    const args = buildMeterCommand({
+      microphoneDevice: this.syntheticInput ? null : microphoneName,
+      synthetic: this.syntheticInput,
+    });
+
+    const audioLevel = new AudioLevelParser({
+      onLevel: (level) => this.emit('audio-level', level),
+    });
+    const meter = new FfmpegProcess({
+      executable: this.locator.requirePath(),
+      args,
+      spawner: this.spawner,
+      onStderrLine: (line) => {
+        audioLevel.push(line);
+      },
+      onSpawn: (pid) => {
+        this.registry.add(pid);
+        this.logger.info(`Audio meter started (pid ${String(pid)}).`);
+      },
+    });
+    meter.on('spawn-error', (error) =>
+      this.logger.error(`Audio meter failed: ${redact(error)}`),
+    );
+    meter.on('exit', () => {
+      this.registry.remove(meter.pid);
+      if (this.meterProcess === meter) {
+        this.meterProcess = null;
+        this.meterDeviceId = null;
+        this.emit('audio-level', 0);
+      }
+    });
+
+    this.meterProcess = meter;
+    this.meterDeviceId = microphoneDeviceId;
+    meter.start();
+  }
+
+  /** Stops the standalone audio meter if one is running. Never rejects. */
+  async stopMeter(): Promise<void> {
+    const meter = this.meterProcess;
+    this.meterProcess = null;
+    this.meterDeviceId = null;
+    if (!meter) return;
+    this.emit('audio-level', 0);
+    try {
+      await meter.stop();
+    } catch (error) {
+      this.logger.warn(`Audio meter stop error: ${redact(error)}`);
     }
   }
 
@@ -344,6 +412,8 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
 
     // Release the camera before the streaming process tries to claim it.
     const hadPreview = this.run?.kind === 'preview';
+    // Release the mic held by the standalone meter before the stream opens it.
+    await this.stopMeter();
     await this.stopPreview();
     if (hadPreview) {
       // FFmpeg has exited, but DirectShow does not always hand the device back
@@ -440,6 +510,7 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
       captureMode,
       synthetic: this.syntheticInput,
       audioSyncOffsetMs: config.audioSyncOffsetMs,
+      noiseSuppression: config.noiseSuppression,
     });
 
     this.logger.info(
@@ -514,6 +585,8 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
     }
 
     const hadPreview = this.run?.kind === 'preview';
+    // Release the mic held by the standalone meter before recording opens it.
+    await this.stopMeter();
     await this.stopPreview();
     if (hadPreview) await this.settleDevice();
 
@@ -576,6 +649,7 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
       captureMode,
       synthetic: this.syntheticInput,
       audioSyncOffsetMs: config.audioSyncOffsetMs,
+      noiseSuppression: config.noiseSuppression,
     });
 
     this.logger.info(
@@ -625,6 +699,7 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
 
   /** Immediate termination. Only used during an emergency app shutdown. */
   async forceStop(): Promise<void> {
+    await this.stopMeter();
     const active = this.run;
     if (!active) return;
     active.stopping = true;
@@ -638,6 +713,7 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
    */
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    await this.stopMeter();
     const active = this.run;
     if (!active) return;
     try {

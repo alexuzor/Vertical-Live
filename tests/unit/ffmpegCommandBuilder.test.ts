@@ -6,12 +6,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  MASTER_HEIGHT,
-  MASTER_WIDTH,
   PREVIEW_FPS,
   PREVIEW_HEIGHT,
   PREVIEW_RTBUFSIZE,
   PREVIEW_WIDTH,
+  RECORDING_HEIGHT,
+  RECORDING_WIDTH,
   STREAM_HEIGHT,
   STREAM_WIDTH,
 } from '../../src/shared/constants';
@@ -19,13 +19,16 @@ import {
   InvalidDestinationError,
   buildAudioEncoderArgs,
   buildAudioInputArgs,
+  buildBranchScale,
   buildDeviceListCommand,
   buildDeviceOptionsCommand,
   buildEncoderArgs,
   buildEncoderTestCommand,
+  NOISE_REDUCTION_CHAIN,
   buildFacebookUrl,
   buildFilterGraph,
-  buildFramingFilter,
+  buildMeterCommand,
+  buildPortraitCropFilter,
   buildPreviewCommand,
   buildRecordingCommand,
   buildRemuxCommand,
@@ -37,6 +40,7 @@ import {
   formatDshowInput,
   isDshowNameUsable,
 } from '../../src/main/streaming/FfmpegCommandBuilder';
+import { DEFAULT_SETTINGS } from '../../src/shared/schemas';
 import type { EncoderId } from '../../src/shared/types';
 
 /** Reads the value that follows a flag in an argv array. */
@@ -141,27 +145,43 @@ describe('calculateBufsizeKbps', () => {
 
 /* ------------------------------------------------------------------ */
 
-describe('buildFramingFilter', () => {
-  it('fill scales up then centre-crops to the exact canvas', () => {
-    const filter = buildFramingFilter('fill');
-    expect(filter).toContain(`scale=${MASTER_WIDTH}:${MASTER_HEIGHT}`);
-    expect(filter).toContain('force_original_aspect_ratio=increase');
-    expect(filter).toContain(`crop=${MASTER_WIDTH}:${MASTER_HEIGHT}`);
-    expect(filter).not.toContain('pad=');
+describe('portrait framing', () => {
+  it('fill crops once to an exact 9:16 rectangle and never scales the source up', () => {
+    const crop = buildPortraitCropFilter();
+    expect(crop).toContain('crop=');
+    // The largest 9:16 rectangle that fits — the minimum crop, centred.
+    expect(crop).toContain('min(iw');
+    expect(crop).toContain('9/16');
+    expect(crop).toContain('16/9');
+    // Even dimensions for yuv420p.
+    expect(crop).toContain('/2)*2');
+    // Crop-first: it must not enlarge the source to cover the canvas.
+    expect(crop).not.toContain('scale=');
+    expect(crop).not.toContain('increase');
   });
 
-  it('fit scales down then pads with black', () => {
-    const filter = buildFramingFilter('fit');
-    expect(filter).toContain('force_original_aspect_ratio=decrease');
-    expect(filter).toContain(
-      `pad=${MASTER_WIDTH}:${MASTER_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black`,
+  it('fill branch is a plain scale to the exact output size (master already 9:16)', () => {
+    const scale = buildBranchScale('fill', PREVIEW_WIDTH, PREVIEW_HEIGHT);
+    expect(scale).toBe(`scale=${PREVIEW_WIDTH}:${PREVIEW_HEIGHT}`);
+    expect(scale).not.toContain('crop');
+    expect(scale).not.toContain('pad');
+  });
+
+  it('fit preserves the whole frame: scale down and pad black, no crop', () => {
+    const fit = buildBranchScale('fit', RECORDING_WIDTH, RECORDING_HEIGHT);
+    expect(fit).toContain('force_original_aspect_ratio=decrease');
+    expect(fit).toContain(
+      `pad=${RECORDING_WIDTH}:${RECORDING_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black`,
     );
-    expect(filter).not.toContain('crop=');
+    expect(fit).not.toContain('crop=');
   });
 
-  it('keeps intermediate dimensions even, which yuv420p requires', () => {
-    expect(buildFramingFilter('fill')).toContain('force_divisible_by=2');
-    expect(buildFramingFilter('fit')).toContain('force_divisible_by=2');
+  it('crops exactly once, on the master, only in fill mode', () => {
+    const fill = buildFilterGraph('fill', 30, { stream: true, recording: true, preview: true });
+    const fit = buildFilterGraph('fit', 30, { stream: true, recording: true, preview: true });
+    expect(fill.filterComplex.match(/crop=/g)?.length).toBe(1);
+    expect(fill.filterComplex).toContain('[0:v]fps=30,crop=');
+    expect(fit.filterComplex).not.toContain('crop=');
   });
 });
 
@@ -199,15 +219,14 @@ describe('buildFilterGraph', () => {
     expect(filterComplex).toContain(`scale=${STREAM_WIDTH}:${STREAM_HEIGHT}[v_stream]`);
   });
 
-  it('keeps the recording branch at the full 1080x1920 master', () => {
+  it('scales the recording branch to the full 1080x1920 output', () => {
     const { filterComplex } = buildFilterGraph('fill', 30, {
       stream: false,
       recording: true,
       preview: false,
     });
-    // A `null` pass-through, i.e. no rescale of the master.
-    expect(filterComplex).toContain('null[v_record]');
-    expect(filterComplex).not.toContain(`scale=${STREAM_WIDTH}`);
+    expect(filterComplex).toContain(`scale=${RECORDING_WIDTH}:${RECORDING_HEIGHT}[v_record]`);
+    expect(filterComplex).not.toContain(`scale=${STREAM_WIDTH}:${STREAM_HEIGHT}`);
   });
 
   it('emits a small, slow preview branch', () => {
@@ -471,6 +490,7 @@ describe('buildStreamCommand', () => {
     captureMode: null,
     synthetic: false,
     audioSyncOffsetMs: 0,
+    noiseSuppression: false,
   };
 
   it('applies a manual audio sync offset via -itsoffset before the mic input', () => {
@@ -613,107 +633,84 @@ describe('buildStreamCommand', () => {
 });
 
 describe('buildPreviewCommand', () => {
-  it('opens no audio device when no microphone is selected (mic left free)', () => {
-    const args = buildPreviewCommand({
-      cameraDevice: 'Cam',
-      microphoneDevice: null,
-      framingMode: 'fill',
-      fps: 30,
-      captureMode: null,
-      synthetic: false,
-    });
-    expect(args).not.toContain('audio=');
+  const previewBase = {
+    cameraDevice: 'Cam',
+    framingMode: 'fill' as const,
+    fps: 30 as const,
+    captureMode: null,
+    synthetic: false,
+  };
+
+  it('is camera-only: one input, no audio, no meter (the mic is a separate process)', () => {
+    const args = buildPreviewCommand(previewBase);
     expect(args.filter((arg) => arg === '-i')).toHaveLength(1);
+    expect(args.join(' ')).not.toContain('audio=');
     expect(args).toContain('-an');
     expect(args.join(' ')).not.toContain('ebur128');
   });
 
-  it('opens the mic and a discarded ebur128 meter sink when a microphone is selected', () => {
-    const args = buildPreviewCommand({
-      cameraDevice: 'Cam',
-      microphoneDevice: 'Microphone (Realtek)',
-      framingMode: 'fill',
-      fps: 30,
-      captureMode: null,
-      synthetic: false,
-    });
-    // Two inputs now: camera + mic.
-    expect(args.filter((arg) => arg === '-i')).toHaveLength(2);
-    expect(args.join(' ')).toContain('audio=Microphone (Realtek)');
-    const graph = valueAfter(args, '-filter_complex') ?? '';
-    expect(graph).toContain('ebur128=peak=true');
-    // The meter output is mapped to a null sink, and the preview stays on stdout.
-    const joined = args.join(' ');
-    expect(joined).toContain('-f null');
-    expect(args).toContain('pipe:1');
-  });
-
-  it('composes the same master canvas as a live send', () => {
-    const args = buildPreviewCommand({
-      cameraDevice: 'Cam',
-      microphoneDevice: null,
-      framingMode: 'fit',
-      fps: 30,
-      captureMode: null,
-      synthetic: false,
-    });
-    const graph = valueAfter(args, '-filter_complex') ?? '';
-    expect(graph).toContain(`scale=${MASTER_WIDTH}:${MASTER_HEIGHT}`);
+  it('applies fit framing straight to the preview size, with no 1080x1920 intermediate', () => {
+    const graph =
+      valueAfter(
+        buildPreviewCommand({ ...previewBase, framingMode: 'fit' }),
+        '-filter_complex',
+      ) ?? '';
+    // The whole frame is preserved (fit), padded straight to the preview size.
+    expect(graph).toContain(
+      `scale=${PREVIEW_WIDTH}:${PREVIEW_HEIGHT}:force_original_aspect_ratio=decrease`,
+    );
     expect(graph).toContain('pad=');
-    expect(graph).toContain(`scale=${PREVIEW_WIDTH}:${PREVIEW_HEIGHT}`);
+    expect(graph).not.toContain(`scale=${RECORDING_WIDTH}:${RECORDING_HEIGHT}`);
   });
 
   it('writes MJPEG to stdout', () => {
-    const args = buildPreviewCommand({
-      cameraDevice: 'Cam',
-      microphoneDevice: null,
-      framingMode: 'fill',
-      fps: 30,
-      captureMode: null,
-      synthetic: false,
-    });
-    expect(args.at(-1)).toBe('pipe:1');
+    expect(buildPreviewCommand(previewBase).at(-1)).toBe('pipe:1');
   });
 
-  it('composites the master at the preview frame rate, not the stream rate', () => {
-    const args = buildPreviewCommand({
-      cameraDevice: 'Cam',
-      microphoneDevice: null,
-      framingMode: 'fill',
-      fps: 60,
-      captureMode: null,
-      synthetic: false,
-    });
-    const graph = valueAfter(args, '-filter_complex') ?? '';
-    // The expensive 1080x1920 composition runs at PREVIEW_FPS, never the 60 fps
-    // the user configured for the live send.
+  it('composes the preview at the preview frame rate, not the stream rate', () => {
+    const graph = valueAfter(buildPreviewCommand(previewBase), '-filter_complex') ?? '';
+    // The composition runs at PREVIEW_FPS, never the 30 fps the user configured.
     expect(graph).toContain(`[0:v]fps=${PREVIEW_FPS}`);
-    expect(graph).not.toContain('fps=60');
+    expect(graph).not.toContain('fps=30');
   });
 
   it('caps capture buffering so the preview cannot bank up latency', () => {
-    const args = buildPreviewCommand({
-      cameraDevice: 'Cam',
-      microphoneDevice: null,
-      framingMode: 'fill',
-      fps: 30,
-      captureMode: null,
-      synthetic: false,
-    });
+    const args = buildPreviewCommand(previewBase);
     expect(valueAfter(args, '-rtbufsize')).toBe(PREVIEW_RTBUFSIZE);
     expect(valueAfter(args, '-fflags')).toBe('nobuffer');
   });
 
   it('flushes each JPEG to the pipe immediately', () => {
-    const args = buildPreviewCommand({
-      cameraDevice: 'Cam',
-      microphoneDevice: null,
-      framingMode: 'fill',
-      fps: 30,
-      captureMode: null,
+    expect(valueAfter(buildPreviewCommand(previewBase), '-flush_packets')).toBe('1');
+  });
+});
+
+describe('buildMeterCommand', () => {
+  it('opens the microphone and runs it through ebur128 into a null sink', () => {
+    const args = buildMeterCommand({
+      microphoneDevice: 'Microphone (Realtek)',
       synthetic: false,
     });
-    expect(valueAfter(args, '-flush_packets')).toBe('1');
+    expect(args.join(' ')).toContain('audio=Microphone (Realtek)');
+    const graph = valueAfter(args, '-filter_complex') ?? '';
+    expect(graph).toContain('ebur128=peak=true');
+    // Audio is discarded; there is no video and no encoded/piped output.
+    const joined = args.join(' ');
+    expect(joined).toContain('-f null');
+    expect(joined).not.toContain('pipe:1');
+    expect(joined).not.toContain('-c:v');
+  });
+
+  it('has exactly one input — the microphone only, never the camera', () => {
+    const args = buildMeterCommand({ microphoneDevice: 'Mic', synthetic: false });
+    expect(args.filter((arg) => arg === '-i')).toHaveLength(1);
+    expect(args.join(' ')).not.toContain('video=');
+  });
+
+  it('uses a synthetic sine source in synthetic mode', () => {
+    expect(buildMeterCommand({ microphoneDevice: null, synthetic: true }).join(' ')).toContain(
+      'sine=',
+    );
   });
 });
 
@@ -731,6 +728,7 @@ describe('buildRecordingCommand', () => {
     captureMode: null,
     synthetic: false,
     audioSyncOffsetMs: 0,
+    noiseSuppression: false,
   };
 
   it('writes a matroska file and never opens a network output', () => {
@@ -743,10 +741,10 @@ describe('buildRecordingCommand', () => {
     expect(args.join(' ')).not.toContain('flv');
   });
 
-  it('composes the same 1080×1920 master and records at 10 Mbps', () => {
+  it('records at the full 1080×1920 output and 10 Mbps', () => {
     const args = buildRecordingCommand(base);
     const graph = valueAfter(args, '-filter_complex') ?? '';
-    expect(graph).toContain(`scale=${MASTER_WIDTH}:${MASTER_HEIGHT}`);
+    expect(graph).toContain(`scale=${RECORDING_WIDTH}:${RECORDING_HEIGHT}[v_record]`);
     // No 720×1280 Facebook branch is present.
     expect(graph).not.toContain(`scale=${STREAM_WIDTH}:${STREAM_HEIGHT}`);
     expect(valueAfter(args, '-b:v')).toBe('10000k');
@@ -771,6 +769,75 @@ describe('buildRecordingCommand', () => {
 });
 
 /* ------------------------------------------------------------------ */
+
+describe('noise cancellation', () => {
+  const streamBase = {
+    cameraDevice: 'Cam',
+    microphoneDevice: 'Mic',
+    framingMode: 'fill' as const,
+    fps: 30 as const,
+    bitrateKbps: 3500,
+    encoder: 'libx264' as EncoderId,
+    destination: { kind: 'rtmp' as const, url: 'rtmps://x.facebook.com/rtmp/KEY' },
+    recordingPath: 'C:\\out\\clip.mkv',
+    preview: true,
+    captureMode: null,
+    synthetic: false,
+    audioSyncOffsetMs: 0,
+  };
+  const recordBase = {
+    cameraDevice: 'Cam',
+    microphoneDevice: 'Mic',
+    framingMode: 'fill' as const,
+    fps: 30 as const,
+    encoder: 'libx264' as EncoderId,
+    recordingPath: 'C:\\out\\clip.mkv',
+    preview: true,
+    captureMode: null,
+    synthetic: false,
+    audioSyncOffsetMs: 0,
+  };
+
+  it('off: the audio chain contains no noise-reduction filters', () => {
+    const graph =
+      valueAfter(
+        buildStreamCommand({ ...streamBase, noiseSuppression: false }),
+        '-filter_complex',
+      ) ?? '';
+    expect(graph).not.toContain('afftdn');
+    expect(graph).not.toContain('highpass');
+    expect(graph).not.toContain(NOISE_REDUCTION_CHAIN);
+  });
+
+  it('on: inserts the noise-reduction chain exactly once, upstream of the audio split', () => {
+    const graph =
+      valueAfter(
+        buildStreamCommand({ ...streamBase, noiseSuppression: true }),
+        '-filter_complex',
+      ) ?? '';
+    expect(graph).toContain(NOISE_REDUCTION_CHAIN);
+    expect(graph.match(/afftdn/g)?.length).toBe(1);
+    // It sits on the normalised master audio, before asplit fans it out to the
+    // stream and recording encoders — so both branches get the cleaned audio.
+    const denoiseAt = graph.indexOf('afftdn');
+    const splitAt = graph.indexOf('asplit');
+    expect(denoiseAt).toBeGreaterThan(-1);
+    expect(splitAt).toBeGreaterThan(denoiseAt);
+  });
+
+  it('on: the local recording branch also receives cleaned audio', () => {
+    const graph =
+      valueAfter(
+        buildRecordingCommand({ ...recordBase, noiseSuppression: true }),
+        '-filter_complex',
+      ) ?? '';
+    expect(graph).toContain(NOISE_REDUCTION_CHAIN);
+  });
+
+  it('off by default in persisted settings', () => {
+    expect(DEFAULT_SETTINGS.noiseSuppression).toBe(false);
+  });
+});
 
 describe('probe commands', () => {
   it('lists devices through the dshow demuxer', () => {

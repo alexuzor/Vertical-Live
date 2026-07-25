@@ -7,7 +7,9 @@ import { Field, Panel } from './primitives';
 
 export function FacebookConnectionPanel() {
   const d = useDashboard();
-  const placeholder = d.hasStoredKey ? '•••••••••• (saved) ••••••••••' : '••••••••••••••••••••••••••';
+  const placeholder = d.hasStoredKey
+    ? '•••••••••• (saved) ••••••••••'
+    : '••••••••••••••••••••••••••';
   const testing = d.connectionState === 'testing';
 
   return (

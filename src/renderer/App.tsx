@@ -7,6 +7,8 @@
 
 import { useState } from 'react';
 
+import { BUILD_REV, BUILD_TIME } from '@shared/buildInfo';
+
 import { ActionsBar } from './components/ActionsBar';
 import { AppFooter } from './components/AppFooter';
 import { AppHeader } from './components/AppHeader';
@@ -64,11 +66,22 @@ function Dashboard() {
 export default function App() {
   const [booted, setBooted] = useState(false);
 
-  if (!booted) return <BootScreen onReady={() => setBooted(true)} />;
-
   return (
-    <DashboardProvider>
-      <Dashboard />
-    </DashboardProvider>
+    <>
+      {booted ? (
+        <DashboardProvider>
+          <Dashboard />
+        </DashboardProvider>
+      ) : (
+        <BootScreen onReady={() => setBooted(true)} />
+      )}
+
+      {/* Dev-only proof of which source is running; never present in a build. */}
+      {import.meta.env.DEV && (
+        <div className="dev-badge" title={BUILD_TIME ? `Built ${BUILD_TIME}` : undefined}>
+          DEV BUILD · {BUILD_REV}
+        </div>
+      )}
+    </>
   );
 }

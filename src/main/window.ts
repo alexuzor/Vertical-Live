@@ -24,56 +24,98 @@ export interface CreateWindowOptions {
   devServerUrl: string | null;
   /** Absolute path to the built index.html in production. */
   indexHtmlPath: string;
-  bounds: WindowBounds | null;
+  /** Persisted bounds from a previous session, or null on first launch. */
+  savedBounds: WindowBounds | null;
+  /** Usable area of the display to open on (for centring and clamping). */
+  workArea: WorkArea;
   /** Window / taskbar icon (the real brand PNG). */
   icon?: string;
   onReadyToShow?: () => void;
 }
 
-// The dashboard needs room for two full control columns; the reference design
-// is 16:9, so the defaults and floor keep that shape.
-export const MIN_WINDOW_WIDTH = 1280;
-export const MIN_WINDOW_HEIGHT = 760;
-export const DEFAULT_WINDOW_WIDTH = 1648;
-export const DEFAULT_WINDOW_HEIGHT = 928;
+// The restored window opens at ~1230x830, centred; the renderer scales its fixed
+// design to fit, so a smaller window (or display) simply shows a smaller
+// dashboard. The floor stays below the restore size so the restore size is
+// always achievable, even on modest laptops.
+export const DEFAULT_WINDOW_WIDTH = 1230;
+export const DEFAULT_WINDOW_HEIGHT = 830;
+export const MIN_WINDOW_WIDTH = 1000;
+export const MIN_WINDOW_HEIGHT = 680;
+
+/** A display's usable area (excludes the taskbar), from `Display.workArea`. */
+export interface WorkArea {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Minimum on-screen slice, in px, that keeps a window grabbable. */
+const MIN_VISIBLE_PX = 96;
 
 /**
- * Keeps restored bounds usable: a window saved on a monitor that is no longer
- * attached would otherwise open off-screen.
+ * A saved position is honoured only when the window would stay substantially
+ * on-screen: enough horizontal overlap to grab it, and a title bar that is
+ * neither above the work area nor below its bottom edge. This is what rejects a
+ * rectangle saved on a monitor that is no longer attached.
  */
-export function sanitiseBounds(
-  bounds: WindowBounds | null,
-  displayArea: { x: number; y: number; width: number; height: number } | null,
-): Partial<WindowBounds> {
-  if (!bounds) return {};
+function isPositionVisible(bounds: WindowBounds, width: number, work: WorkArea): boolean {
+  const overlapsHorizontally =
+    bounds.x + width - MIN_VISIBLE_PX > work.x &&
+    bounds.x + MIN_VISIBLE_PX < work.x + work.width;
+  const titleBarOnScreen =
+    bounds.y >= work.y && bounds.y <= work.y + work.height - MIN_VISIBLE_PX;
+  return overlapsHorizontally && titleBarOnScreen;
+}
 
-  const width = Math.max(MIN_WINDOW_WIDTH, Math.round(bounds.width));
-  const height = Math.max(MIN_WINDOW_HEIGHT, Math.round(bounds.height));
+/**
+ * The window's initial size and position.
+ *
+ * Uses the saved bounds when they are still valid and visible; otherwise the
+ * default size centred on the work area. Size is always clamped to the work
+ * area (never below the minimum), so a small display — or a stale rectangle from
+ * a disconnected second monitor — can never open the window oversized or
+ * off-screen. Pure and side-effect free, so it is unit-tested directly.
+ */
+export function computeInitialBounds(saved: WindowBounds | null, work: WorkArea): WindowBounds {
+  const width = Math.min(
+    work.width,
+    Math.max(MIN_WINDOW_WIDTH, Math.round(saved?.width ?? DEFAULT_WINDOW_WIDTH)),
+  );
+  const height = Math.min(
+    work.height,
+    Math.max(MIN_WINDOW_HEIGHT, Math.round(saved?.height ?? DEFAULT_WINDOW_HEIGHT)),
+  );
 
-  if (!displayArea) return { width, height };
+  if (saved && isPositionVisible(saved, width, work)) {
+    return { x: Math.round(saved.x), y: Math.round(saved.y), width, height };
+  }
 
-  const maxX = displayArea.x + displayArea.width;
-  const maxY = displayArea.y + displayArea.height;
-  const visible = bounds.x < maxX && bounds.y < maxY && bounds.x + width > displayArea.x;
-
-  if (!visible) return { width, height };
-
-  return { x: Math.round(bounds.x), y: Math.round(bounds.y), width, height };
+  // Centre on the work area.
+  return {
+    x: Math.round(work.x + (work.width - width) / 2),
+    y: Math.round(work.y + (work.height - height) / 2),
+    width,
+    height,
+  };
 }
 
 export function createMainWindow(options: CreateWindowOptions): BrowserWindow {
+  // Restore to a valid on-screen rectangle (or the centred default). Explicit
+  // x/y/width/height — never a bare `center: true` — so restore is deterministic
+  // and testable, and maximising still fills the desktop normally.
+  const bounds = computeInitialBounds(options.savedBounds, options.workArea);
+
   const window = new BrowserWindow({
-    // The dashboard is laid out to fit exactly at the default dimensions, but the
-    // window can be maximised to fill the desktop. The layout never scrolls at
-    // any size (the renderer clips overflow), and the minimum floor stops it from
-    // being dragged small enough to hide controls. Maximising needs `resizable`
-    // AND `maximizable` on Windows, so both are enabled.
-    width: DEFAULT_WINDOW_WIDTH,
-    height: DEFAULT_WINDOW_HEIGHT,
+    // The renderer scales its fixed design to fit the window, so any size from the
+    // minimum floor up works; maximising fills the desktop. Maximising needs
+    // `resizable` AND `maximizable` on Windows, so both are enabled.
+    x: bounds.x,
+    y: bounds.y,
+    width: bounds.width,
+    height: bounds.height,
     minWidth: MIN_WINDOW_WIDTH,
     minHeight: MIN_WINDOW_HEIGHT,
-    ...(options.bounds?.x !== undefined ? { x: options.bounds.x } : {}),
-    ...(options.bounds?.y !== undefined ? { y: options.bounds.y } : {}),
     resizable: true,
     maximizable: true,
     fullscreenable: true,

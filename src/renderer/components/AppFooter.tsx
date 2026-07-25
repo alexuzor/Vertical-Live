@@ -27,7 +27,9 @@ export function AppFooter() {
       </span>
       <span className="footer__item">
         <span className="k">Bitrate:</span>
-        <span className="v">{d.bitrateMbps > 0 ? `${d.bitrateMbps.toFixed(1)} Mbps` : '—'}</span>
+        <span className="v">
+          {d.bitrateMbps > 0 ? `${d.bitrateMbps.toFixed(1)} Mbps` : '—'}
+        </span>
       </span>
 
       <span className="footer__spacer" />

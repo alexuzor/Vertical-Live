@@ -13,16 +13,12 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { app, dialog, ipcMain, safeStorage, screen } from 'electron';
-import type { BrowserWindow } from 'electron';
+import { app, dialog, ipcMain, MessageChannelMain, safeStorage, screen } from 'electron';
+import type { BrowserWindow, MessagePortMain } from 'electron';
 
+import { BUILD_REV, BUILD_TIME } from '../shared/buildInfo';
 import { ENV_DRY_RUN, ENV_SYNTHETIC_INPUT } from '../shared/constants';
-import type {
-  StreamErrorPayload,
-  StreamStats,
-  StreamStatus,
-  WindowBounds,
-} from '../shared/types';
+import type { StreamErrorPayload, StreamStats, StreamStatus } from '../shared/types';
 import { isRecoverable } from '../shared/errors';
 
 import { IPC } from './ipc/channels';
@@ -35,12 +31,7 @@ import { SettingsStore } from './settings/SettingsStore';
 import { StreamingEngine } from './streaming/StreamingEngine';
 import { isStreamActive } from './streaming/StateMachine';
 import { UpdateService } from './update/UpdateService';
-import {
-  createMainWindow,
-  resolveIndexHtmlPath,
-  resolvePreloadPath,
-  sanitiseBounds,
-} from './window';
+import { createMainWindow, resolveIndexHtmlPath, resolvePreloadPath } from './window';
 
 const isDev = !app.isPackaged;
 
@@ -57,6 +48,10 @@ let logger: Logger | null = null;
 let disposeIpc: (() => void) | null = null;
 let settingsStore: SettingsStore | null = null;
 let updateService: UpdateService | null = null;
+// The main-process end of the dedicated preview-frame MessagePort. Preview JPEGs
+// are transferred over this instead of the shared IPC channel, so high-frequency
+// binary frames never contend with ordinary command/status IPC.
+let previewPort: MessagePortMain | null = null;
 let confirmedQuit = false;
 let saveBoundsTimer: NodeJS.Timeout | null = null;
 
@@ -164,10 +159,21 @@ async function bootstrap(): Promise<void> {
 
   /* ---- Window -------------------------------------------------- */
 
-  const displayArea = screen.getPrimaryDisplay().workArea;
-  const bounds = sanitiseBounds(settings.windowBounds, displayArea);
+  // Open on the display under the cursor, centred there on first launch.
+  const workArea = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
 
   const devServerUrl = process.env.ELECTRON_RENDERER_URL ?? null;
+
+  // Prove exactly what is running: which source revision, which bundles and
+  // renderer URL, and which FFmpeg. This is the fastest way to catch a dev run
+  // that loaded stale output. No secrets are logged.
+  logger.info('--- runtime provenance ---');
+  logger.info(`Application mode: ${app.isPackaged ? 'production' : 'development'}`);
+  logger.info(`Source revision: ${BUILD_REV}${BUILD_TIME ? ` (built ${BUILD_TIME})` : ''}`);
+  logger.info(`Main bundle: ${join(APP_OUT_DIR, 'main', 'main.js')}`);
+  logger.info(`Preload bundle: ${resolvePreloadPath(APP_OUT_DIR)}`);
+  logger.info(`Renderer URL: ${devServerUrl ?? resolveIndexHtmlPath(APP_OUT_DIR)}`);
+  logger.info(`FFmpeg path: ${ffmpegInfo.path ?? 'not found'}`);
 
   // The real brand icon, resolved for both dev and packaged layouts.
   const iconPath = app.isPackaged
@@ -178,7 +184,8 @@ async function bootstrap(): Promise<void> {
     preloadPath: resolvePreloadPath(APP_OUT_DIR),
     devServerUrl,
     indexHtmlPath: resolveIndexHtmlPath(APP_OUT_DIR),
-    bounds: bounds.width !== undefined ? (bounds as WindowBounds) : null,
+    savedBounds: settings.windowBounds,
+    workArea,
     icon: existsSync(iconPath) ? iconPath : undefined,
   });
 
@@ -260,7 +267,19 @@ function wireEngineEvents(
 
   active.on('status', (status: StreamStatus) => send(IPC.streamStatus, status));
   active.on('stats', (stats: StreamStats) => send(IPC.streamStats, stats));
-  active.on('preview-frame', (frame: Buffer) => send(IPC.previewFrame, frame));
+  active.on('preview-frame', (frame: Buffer) => {
+    if (!previewPort) return;
+    // Slice out exactly this frame's bytes into a standalone ArrayBuffer (FFmpeg's
+    // read buffer is a shared pool, so sending `frame.buffer` would copy the whole
+    // pool). MessagePortMain clones the buffer to the renderer — off the ordinary
+    // IPC channel, so high-frequency frames never contend with commands/status.
+    const ab = frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength);
+    try {
+      previewPort.postMessage(ab);
+    } catch {
+      // Renderer went away mid-frame; the next reload re-establishes the port.
+    }
+  });
   active.on('audio-level', (level: number) => send(IPC.audioLevel, level));
   active.on(
     'error',
@@ -274,7 +293,23 @@ function wireEngineEvents(
   );
 }
 
+/**
+ * (Re)establishes the dedicated preview-frame MessagePort with the renderer.
+ * Called on every `did-finish-load`, so a dev hot-reload or navigation always
+ * gets a fresh port. The previous port is closed so frames are never posted into
+ * a dead renderer.
+ */
+function establishPreviewPort(window: BrowserWindow): void {
+  if (window.isDestroyed()) return;
+  previewPort?.close();
+  const { port1, port2 } = new MessageChannelMain();
+  previewPort = port1;
+  window.webContents.postMessage(IPC.previewPort, null, [port2]);
+}
+
 function wireWindowEvents(window: BrowserWindow): void {
+  window.webContents.on('did-finish-load', () => establishPreviewPort(window));
+
   const persistBounds = (): void => {
     if (!settingsStore || window.isDestroyed() || window.isMinimized()) return;
     const { x, y, width, height } = window.getNormalBounds();
@@ -308,6 +343,8 @@ function wireWindowEvents(window: BrowserWindow): void {
   });
 
   window.on('closed', () => {
+    previewPort?.close();
+    previewPort = null;
     mainWindow = null;
   });
 }

@@ -34,6 +34,7 @@ const VALID_CONFIG = {
   recordingEnabled: false,
   recordingDirectory: null,
   audioSyncOffsetMs: 0,
+  noiseSuppression: false,
 };
 
 describe('facebookServerUrlSchema', () => {

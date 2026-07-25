@@ -43,12 +43,7 @@ import { getApi, isElectron } from '../lib/api';
 
 export type StreamState = 'idle' | 'connecting' | 'streaming' | 'stopping' | 'error';
 export type RecordingState =
-  | 'idle'
-  | 'starting'
-  | 'recording'
-  | 'stopping'
-  | 'finalising'
-  | 'error';
+  'idle' | 'starting' | 'recording' | 'stopping' | 'finalising' | 'error';
 export type PreviewState = 'idle' | 'starting' | 'active' | 'error';
 export type ModalVariant = 'stop-stream' | 'stop-recording';
 export type ConnectionState = 'idle' | 'testing' | 'ok' | 'fail';
@@ -89,6 +84,8 @@ export interface DashboardController {
   microphone: string;
   devicesLoading: boolean;
   monitoring: boolean;
+  /** Microphone noise cancellation (affects streamed and recorded audio). */
+  noiseSuppression: boolean;
   fps: string;
 
   /* Framing */
@@ -137,6 +134,7 @@ export interface DashboardController {
   setCamera: (id: string) => void;
   setMicrophone: (id: string) => void;
   setMonitoring: (on: boolean) => void;
+  setNoiseSuppression: (on: boolean) => void;
   audioSyncOffsetMs: number;
   setAudioSyncOffset: (ms: number) => void;
   setFps: (value: string) => void;
@@ -257,6 +255,7 @@ function useController(): DashboardController {
   const [microphone, setMicrophoneState] = useState('');
   const [devicesLoading, setDevicesLoading] = useState(false);
   const [monitoring, setMonitoringState] = useState(true);
+  const [noiseSuppression, setNoiseSuppressionState] = useState(false);
   const [audioSyncOffsetMs, setAudioSyncOffsetState] = useState(0);
   const [windowMaximized, setWindowMaximized] = useState(false);
   const [fps, setFpsState] = useState('30');
@@ -374,6 +373,15 @@ function useController(): DashboardController {
     },
     [schedulePersist],
   );
+  // Noise cancellation only affects the streamed/recorded audio chain, so it is
+  // pure config: persisting it never touches the running video preview.
+  const setNoiseSuppression = useCallback(
+    (on: boolean) => {
+      setNoiseSuppressionState(on);
+      schedulePersist({ noiseSuppression: on });
+    },
+    [schedulePersist],
+  );
   const setAudioSyncOffset = useCallback(
     (ms: number) => {
       const clamped = Math.max(
@@ -451,6 +459,7 @@ function useController(): DashboardController {
       if (s.cameraDevice) setCameraState(s.cameraDevice);
       if (s.microphoneDevice) setMicrophoneState(s.microphoneDevice);
       setMonitoringState(s.audioEnabled);
+      setNoiseSuppressionState(s.noiseSuppression);
       setAudioSyncOffsetState(s.audioSyncOffsetMs);
       setFpsState(String(s.fps));
       setFramingState(s.framingMode);
@@ -586,7 +595,9 @@ function useController(): DashboardController {
       const mics = result.value.microphones.map((dv) => ({ id: dv.id, label: dv.name }));
       setCameras(cams);
       setMicrophones(mics);
-      setCameraState((prev) => (prev && cams.some((c) => c.id === prev) ? prev : (cams[0]?.id ?? prev)));
+      setCameraState((prev) =>
+        prev && cams.some((c) => c.id === prev) ? prev : (cams[0]?.id ?? prev),
+      );
       setMicrophoneState((prev) =>
         prev && mics.some((m) => m.id === prev) ? prev : (mics[0]?.id ?? prev),
       );
@@ -596,10 +607,10 @@ function useController(): DashboardController {
     };
   }, [api]);
 
-  /* ---- preview: keep the camera showing whenever we are not streaming or
-     recording. The gate stays true across the whole preview lifecycle
-     (idle → preview-starting → previewing) so restarting on a framing/fps/camera
-     change never bounces the effect into a loop. ---- */
+  /* ---- video preview: camera only. Kept alive across the whole preview
+     lifecycle (idle → preview-starting → previewing) and restarted only on a
+     camera / framing / fps change — never on an audio change, because the mic is
+     not part of this process. ---- */
   const canPreview =
     status.state === 'idle' ||
     status.state === 'preview-starting' ||
@@ -609,16 +620,25 @@ function useController(): DashboardController {
     void api
       .startPreview({
         cameraDevice: camera,
-        // The mic is opened during preview only to feed the live level meter,
-        // and only while monitoring is on. Changing either restarts preview.
-        microphoneDevice: monitoring ? microphone || null : null,
         framingMode: framing,
         fps: coerceFps(Number.parseInt(fps, 10)),
       })
       .then((result) => {
         if (!result.ok) showToast('red', result.error.message);
       });
-  }, [api, canPreview, camera, framing, fps, microphone, monitoring, showToast]);
+  }, [api, canPreview, camera, framing, fps, showToast]);
+
+  /* ---- audio meter: a separate, mic-only process. Toggling monitoring or
+     changing the microphone restarts only this — the video preview above is
+     untouched. Runs only while configuring; during a live send/recording the
+     level comes from that pipeline's own meter instead. ---- */
+  useEffect(() => {
+    if (!isElectron) return;
+    const wantMeter = canPreview && monitoring && Boolean(microphone);
+    void api.setMeter(wantMeter ? microphone : null).then((result) => {
+      if (!result.ok) showToast('red', result.error.message);
+    });
+  }, [api, canPreview, monitoring, microphone, showToast]);
 
   /* ---- live microphone level for the audio meter ---- */
   const [audioLevel, setAudioLevel] = useState(0);
@@ -700,6 +720,7 @@ function useController(): DashboardController {
       recordingEnabled: false,
       recordingDirectory: recordingPath || null,
       audioSyncOffsetMs,
+      noiseSuppression,
       ...(key ? { facebookStreamKey: key } : {}),
     });
     if (!result.ok) showToast('red', result.error.message);
@@ -714,6 +735,7 @@ function useController(): DashboardController {
     hasStoredKey,
     microphone,
     monitoring,
+    noiseSuppression,
     recordingPath,
     serverUrl,
     showToast,
@@ -742,6 +764,7 @@ function useController(): DashboardController {
       fps: coerceFps(Number.parseInt(fps, 10)),
       recordingDirectory: recordingPath,
       audioSyncOffsetMs,
+      noiseSuppression,
     });
     if (!result.ok) showToast('red', result.error.message);
   }, [
@@ -752,13 +775,17 @@ function useController(): DashboardController {
     framing,
     microphone,
     monitoring,
+    noiseSuppression,
     recordingPath,
     showToast,
   ]);
 
   const toggleLive = useCallback(async () => {
     if (recordActive) {
-      showToast('neutral', 'Stop the recording first — the camera runs one pipeline at a time.');
+      showToast(
+        'neutral',
+        'Stop the recording first — the camera runs one pipeline at a time.',
+      );
       return;
     }
     if (streamState === 'idle' || streamState === 'error') {
@@ -770,7 +797,10 @@ function useController(): DashboardController {
 
   const toggleRecording = useCallback(async () => {
     if (streamActive) {
-      showToast('neutral', 'Stop the live stream first — the camera runs one pipeline at a time.');
+      showToast(
+        'neutral',
+        'Stop the live stream first — the camera runs one pipeline at a time.',
+      );
       return;
     }
     if (recordingState === 'idle' || recordingState === 'error') {
@@ -842,6 +872,7 @@ function useController(): DashboardController {
     microphone,
     devicesLoading,
     monitoring,
+    noiseSuppression,
     audioSyncOffsetMs,
     fps,
     framing,
@@ -871,6 +902,7 @@ function useController(): DashboardController {
     setCamera,
     setMicrophone,
     setMonitoring,
+    setNoiseSuppression,
     setAudioSyncOffset,
     setFps,
     setFraming,

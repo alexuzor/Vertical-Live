@@ -211,7 +211,7 @@ describe.skipIf(ffmpegPath === null)('FFmpeg pipeline (synthetic input)', () => 
         preview: false,
         captureMode: null,
         synthetic: true,
-      audioSyncOffsetMs: 0,
+        audioSyncOffsetMs: 0,
         durationSeconds: 2,
       }),
     );
@@ -245,7 +245,7 @@ describe.skipIf(ffmpegPath === null)('FFmpeg pipeline (synthetic input)', () => 
         preview: false,
         captureMode: null,
         synthetic: true,
-      audioSyncOffsetMs: 0,
+        audioSyncOffsetMs: 0,
         durationSeconds: 2,
       }),
     );
@@ -279,7 +279,7 @@ describe.skipIf(ffmpegPath === null)('FFmpeg pipeline (synthetic input)', () => 
         preview: false,
         captureMode: null,
         synthetic: true,
-      audioSyncOffsetMs: 0,
+        audioSyncOffsetMs: 0,
         durationSeconds: 2,
       }),
     );
@@ -309,7 +309,7 @@ describe.skipIf(ffmpegPath === null)('FFmpeg pipeline (synthetic input)', () => 
         preview: false,
         captureMode: null,
         synthetic: true,
-      audioSyncOffsetMs: 0,
+        audioSyncOffsetMs: 0,
         durationSeconds: 2,
       }),
     );
@@ -346,7 +346,7 @@ describe.skipIf(ffmpegPath === null)('FFmpeg pipeline (synthetic input)', () => 
           preview: false,
           captureMode: null,
           synthetic: true,
-      audioSyncOffsetMs: 0,
+          audioSyncOffsetMs: 0,
           durationSeconds: 1,
         }),
       );

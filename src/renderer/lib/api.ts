@@ -50,6 +50,7 @@ const MOCK_SETTINGS: SettingsSnapshot = {
     recordingDirectory: 'C:\\Users\\user\\Videos\\Vertical Live',
     rememberStreamKey: true,
     audioSyncOffsetMs: 0,
+    noiseSuppression: false,
     windowBounds: null,
   },
   hasStoredStreamKey: true,
@@ -64,7 +65,12 @@ const MOCK_DEVICES: DeviceList = {
   ],
   microphones: [
     { name: 'Blue Yeti (USB)', alternativeName: null, id: 'Blue Yeti (USB)', index: 0 },
-    { name: 'Microphone (Realtek)', alternativeName: null, id: 'Microphone (Realtek)', index: 1 },
+    {
+      name: 'Microphone (Realtek)',
+      alternativeName: null,
+      id: 'Microphone (Realtek)',
+      index: 1,
+    },
   ],
   warnings: [],
 };
@@ -97,6 +103,54 @@ const MOCK_STATUS: StreamStatus = {
 };
 
 const noop = (): void => undefined;
+
+/**
+ * Browser-preview only: synthesises a gently moving 360x640 JPEG at ~15 fps so
+ * the real canvas renderer (usePreviewCanvas) can be exercised without Electron.
+ * The shipped app feeds the same handler real FFmpeg MJPEG over the MessagePort.
+ */
+function createSyntheticPreview(handler: (frame: Uint8Array) => void): () => void {
+  if (typeof document === 'undefined') return noop;
+  const canvas = document.createElement('canvas');
+  canvas.width = 360;
+  canvas.height = 640;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return noop;
+
+  let t = 0;
+  let stopped = false;
+  const id = window.setInterval(() => {
+    if (stopped) return;
+    t += 0.05;
+    const g = ctx.createLinearGradient(0, 0, 360, 640);
+    g.addColorStop(0, `hsl(${(t * 40) % 360}, 55%, 22%)`);
+    g.addColorStop(1, '#0c151d');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 360, 640);
+    ctx.fillStyle = '#27dc73';
+    ctx.beginPath();
+    ctx.arc(180 + Math.sin(t) * 120, 320 + Math.cos(t * 1.3) * 240, 26, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(244,247,250,0.85)';
+    ctx.font = '15px sans-serif';
+    ctx.fillText('browser preview (mock)', 16, 36);
+    canvas.toBlob(
+      (blob) => {
+        if (!blob || stopped) return;
+        void blob.arrayBuffer().then((ab) => {
+          if (!stopped) handler(new Uint8Array(ab));
+        });
+      },
+      'image/jpeg',
+      0.7,
+    );
+  }, 66);
+
+  return () => {
+    stopped = true;
+    window.clearInterval(id);
+  };
+}
 
 /**
  * Browser-preview updater. Inert by default so opening the page never nags;
@@ -183,14 +237,20 @@ function createMockApi(): VerticalLiveApi {
         ok<EncoderCapabilities>({
           selected: 'h264_nvenc',
           probes: [
-            { id: 'h264_nvenc', label: 'NVIDIA NVENC', listed: true, usable: true, detail: null, hardware: true },
+            {
+              id: 'h264_nvenc',
+              label: 'NVIDIA NVENC',
+              listed: true,
+              usable: true,
+              detail: null,
+              hardware: true,
+            },
           ],
         }),
       ),
     getSettings: () => Promise.resolve(MOCK_SETTINGS),
     saveSettings: () => Promise.resolve(ok(MOCK_SETTINGS)),
-    clearStreamKey: () =>
-      Promise.resolve(ok({ ...MOCK_SETTINGS, hasStoredStreamKey: false })),
+    clearStreamKey: () => Promise.resolve(ok({ ...MOCK_SETTINGS, hasStoredStreamKey: false })),
     chooseRecordingFolder: () =>
       Promise.resolve<ChooseDirectoryResult>({
         canceled: false,
@@ -201,6 +261,7 @@ function createMockApi(): VerticalLiveApi {
     openRecordingFolder: () => Promise.resolve(ok(true)),
     startPreview: () => delay(ok(true)),
     stopPreview: () => Promise.resolve(ok(true)),
+    setMeter: () => Promise.resolve(ok(true)),
     startStream: () =>
       delay(
         ok<StartStreamResult>({
@@ -266,7 +327,7 @@ function createMockApi(): VerticalLiveApi {
       onMaximizedChanged: () => noop,
     },
     update: createMockUpdater(),
-    onPreviewFrame: () => noop,
+    onPreviewFrame: (handler) => createSyntheticPreview(handler),
     onStreamStatus: () => noop,
     onStreamStats: () => noop,
     onStreamError: () => noop,
