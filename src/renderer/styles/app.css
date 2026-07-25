@@ -69,7 +69,10 @@
      size and then scaled to fit the window (see useFitToWindow). Keep in sync
      with DEFAULT_WINDOW_WIDTH / DEFAULT_WINDOW_HEIGHT in src/main/window.ts. */
   --design-w: 1648px;
-  --design-h: 928px;
+  /* Matched to the 1230x830 restore window's aspect (~1.48) so the dashboard
+     fills it with no top/bottom letterbox and the control column fits without
+     scrolling. Keep in sync with DESIGN_HEIGHT in useFitToWindow.ts. */
+  --design-h: 1112px;
 
   --font: 'Inter', 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
   --font-mono: 'Cascadia Mono', 'Consolas', ui-monospace, monospace;
@@ -382,11 +385,15 @@ button {
 .body__right {
   display: flex;
   flex-direction: column;
+  /* Evenly distribute the panels down the full column height so there is no
+     empty gap at the bottom, with a little breathing room top and bottom. The
+     design height is matched to the window aspect so everything fits without a
+     scrollbar (never allowed) — clip is only a final guard. */
+  justify-content: space-between;
   gap: 8px;
   min-height: 0;
-  /* Fixed-size window: the panels are sized to fit exactly, so the column never
-     scrolls. Clip rather than scroll so no gutter can ever appear. */
   overflow: hidden;
+  padding: 6px 2px;
 }
 
 /* ================================================================== */

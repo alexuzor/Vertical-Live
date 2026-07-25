@@ -440,6 +440,8 @@ export interface VerticalLiveApi {
   stopStream(): Promise<IpcResult<StopResult>>;
   startRecording(config: RecordingConfig): Promise<IpcResult<StartRecordingResult>>;
   stopRecording(): Promise<IpcResult<StopResult>>;
+  /** Start/stop recording independently during an active stream (loopback tap). */
+  setStreamRecording(on: boolean): Promise<IpcResult<StreamStatus>>;
   getStatus(): Promise<StreamStatus>;
   getSystemMetrics(recordingDirectory?: string | null): Promise<SystemMetrics>;
   testConnection(facebookServerUrl: string): Promise<ConnectionTestResult>;

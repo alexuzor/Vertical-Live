@@ -10,6 +10,8 @@ import {
   PREVIEW_HEIGHT,
   PREVIEW_RTBUFSIZE,
   PREVIEW_WIDTH,
+  RECORD_LOOPBACK_INPUT,
+  RECORD_LOOPBACK_OUTPUT,
   RECORDING_HEIGHT,
   RECORDING_WIDTH,
   STREAM_HEIGHT,
@@ -27,6 +29,7 @@ import {
   NOISE_REDUCTION_CHAIN,
   buildFacebookUrl,
   buildFilterGraph,
+  buildLoopbackRecordCommand,
   buildMeterCommand,
   buildPortraitCropFilter,
   buildPreviewCommand,
@@ -564,6 +567,12 @@ describe('buildStreamCommand', () => {
     expect(args).toContain('-an');
   });
 
+  it('flushes preview frames immediately so streaming never buffers the preview', () => {
+    // Without -flush_packets the busy H.264 encoders let preview JPEGs pool in
+    // the output buffer, freezing the preview while live.
+    expect(valueAfter(buildStreamCommand(base), '-flush_packets')).toBe('1');
+  });
+
   it('omits the preview branch when preview is off', () => {
     const args = buildStreamCommand({ ...base, preview: false });
     expect(args).not.toContain('pipe:1');
@@ -766,6 +775,10 @@ describe('buildRecordingCommand', () => {
     const withoutPreview = buildRecordingCommand({ ...base, preview: false });
     expect(withoutPreview).not.toContain('pipe:1');
   });
+
+  it('flushes preview frames immediately while recording', () => {
+    expect(valueAfter(buildRecordingCommand(base), '-flush_packets')).toBe('1');
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -836,6 +849,59 @@ describe('noise cancellation', () => {
 
   it('off by default in persisted settings', () => {
     expect(DEFAULT_SETTINGS.noiseSuppression).toBe(false);
+  });
+});
+
+describe('independent mid-stream record (loopback)', () => {
+  const streamBase = {
+    cameraDevice: 'Cam',
+    microphoneDevice: 'Mic',
+    framingMode: 'fill' as const,
+    fps: 30 as const,
+    bitrateKbps: 2500,
+    encoder: 'libx264' as EncoderId,
+    destination: { kind: 'rtmp' as const, url: 'rtmps://x.facebook.com/rtmp/KEY' },
+    recordingPath: null,
+    preview: true,
+    captureMode: null,
+    synthetic: false,
+    audioSyncOffsetMs: 0,
+  };
+
+  it('publishes the 1080x1920 record branch to the UDP loopback, not a file', () => {
+    const args = buildStreamCommand({ ...streamBase, recordLoopbackUrl: RECORD_LOOPBACK_OUTPUT });
+    const joined = args.join(' ');
+    // Record-quality branch is scaled to 1080x1920 and sent as mpegts to the loopback.
+    const graph = valueAfter(args, '-filter_complex') ?? '';
+    expect(graph).toContain(`scale=${RECORDING_WIDTH}:${RECORDING_HEIGHT}`);
+    expect(joined).toContain('mpegts');
+    expect(joined).toContain(RECORD_LOOPBACK_OUTPUT);
+    // The Facebook branch is unchanged, and nothing is written to a file here.
+    expect(joined).toContain('rtmps://x.facebook.com/rtmp/KEY');
+    expect(joined).not.toContain('matroska');
+  });
+
+  it('still writes an inline MKV when given a file path and no loopback', () => {
+    const args = buildStreamCommand({ ...streamBase, recordingPath: 'C:\\out\\clip.mkv' });
+    const joined = args.join(' ');
+    expect(joined).toContain('matroska');
+    expect(joined).toContain('C:\\out\\clip.mkv');
+    expect(joined).not.toContain('mpegts');
+  });
+
+  it('omits the record branch entirely when neither is set', () => {
+    const graph = valueAfter(buildStreamCommand(streamBase), '-filter_complex') ?? '';
+    expect(graph).not.toContain('[v_record]');
+  });
+
+  it('builds a stream-copy record tap that reads the loopback into an MKV', () => {
+    const args = buildLoopbackRecordCommand(RECORD_LOOPBACK_INPUT, 'C:\\out\\clip.mkv');
+    const joined = args.join(' ');
+    expect(joined).toContain(RECORD_LOOPBACK_INPUT); // taps the loopback
+    expect(joined).toContain('timeout='); // never hangs on a missing producer
+    expect(args).toContain('copy'); // no re-encode
+    expect(joined).toContain('matroska');
+    expect(joined).toContain('C:\\out\\clip.mkv');
   });
 });
 

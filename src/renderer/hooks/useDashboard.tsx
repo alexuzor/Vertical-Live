@@ -108,6 +108,8 @@ export interface DashboardController {
 
   /* Recording */
   recordingPath: string;
+  /** "Record while streaming" — a live send also writes the local file. */
+  recordingEnabled: boolean;
   freeDiskLabel: string;
 
   /* Footer */
@@ -135,6 +137,7 @@ export interface DashboardController {
   setMicrophone: (id: string) => void;
   setMonitoring: (on: boolean) => void;
   setNoiseSuppression: (on: boolean) => void;
+  setRecordingEnabled: (on: boolean) => void;
   audioSyncOffsetMs: number;
   setAudioSyncOffset: (ms: number) => void;
   setFps: (value: string) => void;
@@ -275,6 +278,10 @@ function useController(): DashboardController {
   const [connectionMessage, setConnectionMessage] = useState('Not tested yet.');
 
   const [recordingPath, setRecordingPath] = useState('');
+  // "Record while streaming": when on, a live send also writes the local file in
+  // the SAME FFmpeg pipeline (one camera, two outputs) — decided at go-live,
+  // because FFmpeg outputs are fixed when the process starts.
+  const [recordingEnabled, setRecordingEnabledState] = useState(false);
 
   /* ---- runtime state (from the backend) ---- */
   const [status, setStatus] = useState<StreamStatus>(IDLE_STATUS);
@@ -382,6 +389,13 @@ function useController(): DashboardController {
     },
     [schedulePersist],
   );
+  const setRecordingEnabled = useCallback(
+    (on: boolean) => {
+      setRecordingEnabledState(on);
+      schedulePersist({ recordingEnabled: on });
+    },
+    [schedulePersist],
+  );
   const setAudioSyncOffset = useCallback(
     (ms: number) => {
       const clamped = Math.max(
@@ -467,6 +481,7 @@ function useController(): DashboardController {
       setCustomBitrateState(String(s.customBitrateKbps));
       if (s.facebookServerUrl) setServerUrlState(s.facebookServerUrl);
       if (s.recordingDirectory) setRecordingPath(s.recordingDirectory);
+      setRecordingEnabledState(s.recordingEnabled);
       setHasStoredKey(snapshot.hasStoredStreamKey);
     });
 
@@ -717,7 +732,8 @@ function useController(): DashboardController {
         Number.parseInt(customBitrate, 10) || 3500,
       ),
       facebookServerUrl: serverUrl.trim(),
-      recordingEnabled: false,
+      // Record the live send locally too, in the one pipeline, when armed.
+      recordingEnabled: recordingEnabled && Boolean(recordingPath),
       recordingDirectory: recordingPath || null,
       audioSyncOffsetMs,
       noiseSuppression,
@@ -736,6 +752,7 @@ function useController(): DashboardController {
     microphone,
     monitoring,
     noiseSuppression,
+    recordingEnabled,
     recordingPath,
     serverUrl,
     showToast,
@@ -797,10 +814,17 @@ function useController(): DashboardController {
 
   const toggleRecording = useCallback(async () => {
     if (streamActive) {
-      showToast(
-        'neutral',
-        'Stop the live stream first — the camera runs one pipeline at a time.',
-      );
+      // Independent recording during a live stream: the stream publishes a
+      // record-quality loopback, and this starts/stops a separate tap on it —
+      // any time, without touching the Facebook send.
+      if (!recordingEnabled) {
+        showToast('neutral', 'Turn on “Record while streaming” before going live to record.');
+        return;
+      }
+      const start = recordingState !== 'recording';
+      const result = await api.setStreamRecording(start);
+      if (!result.ok) showToast('red', result.error.message);
+      else showToast('green', start ? 'Recording started.' : 'Recording saved.');
       return;
     }
     if (recordingState === 'idle' || recordingState === 'error') {
@@ -808,7 +832,7 @@ function useController(): DashboardController {
     } else if (recordingState === 'recording') {
       setModal({ variant: 'stop-recording' });
     }
-  }, [recordingState, startRecording, streamActive, showToast]);
+  }, [api, recordingEnabled, recordingState, startRecording, streamActive, showToast]);
 
   /* ---- modal ---- */
   const cancelModal = useCallback(() => {
@@ -886,6 +910,7 @@ function useController(): DashboardController {
     connectionState,
     connectionMessage,
     recordingPath,
+    recordingEnabled,
     freeDiskLabel: formatGiB(metrics.freeDiskBytes),
     cpu: metrics.cpuPercent,
     liveFps: stats ? Math.round(stats.fps) : 0,
@@ -903,6 +928,7 @@ function useController(): DashboardController {
     setMicrophone,
     setMonitoring,
     setNoiseSuppression,
+    setRecordingEnabled,
     setAudioSyncOffset,
     setFps,
     setFraming,

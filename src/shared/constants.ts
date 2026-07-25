@@ -17,6 +17,18 @@ export const STREAM_HEIGHT = 1280;
 export const RECORDING_WIDTH = MASTER_WIDTH;
 export const RECORDING_HEIGHT = MASTER_HEIGHT;
 
+/**
+ * Localhost UDP loopback for independent, mid-stream recording. While streaming
+ * with recording enabled, the live process also publishes the full 1080x1920
+ * record-quality feed (H.264/AAC in MPEG-TS) here. A separate record process can
+ * then tap it with `-c copy` and start/stop at any time without disturbing the
+ * Facebook send — the vMix-style decoupling FFmpeg cannot do within one process.
+ * `?pkt_size=1316` fits an Ethernet MTU; the port is uncommon to avoid clashes,
+ * and the single-instance lock means only one producer ever binds it.
+ */
+export const RECORD_LOOPBACK_OUTPUT = 'udp://127.0.0.1:5333?pkt_size=1316';
+export const RECORD_LOOPBACK_INPUT = 'udp://127.0.0.1:5333';
+
 /** Lightweight preview branch. Deliberately tiny to keep IPC cheap. */
 export const PREVIEW_WIDTH = 360;
 export const PREVIEW_HEIGHT = 640;

@@ -99,6 +99,9 @@ export const meterConfigSchema = z.object({
   microphoneDevice: deviceIdSchema.nullable(),
 });
 
+/** Toggle the independent mid-stream recording tap on or off. */
+export const streamRecordingRequestSchema = z.object({ on: z.boolean() });
+
 export const streamConfigSchema = z.object({
   cameraDevice: deviceIdSchema,
   microphoneDevice: deviceIdSchema.nullable(),

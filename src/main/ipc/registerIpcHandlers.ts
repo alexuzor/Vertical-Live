@@ -29,6 +29,7 @@ import {
   recordingConfigSchema,
   saveSettingsRequestSchema,
   streamConfigSchema,
+  streamRecordingRequestSchema,
   systemMetricsRequestSchema,
   testConnectionRequestSchema,
   validatedStreamConfigSchema,
@@ -315,6 +316,16 @@ export function registerIpcHandlers(context: IpcContext): () => void {
   ipcMain.handle(
     IPC.stopRecording,
     guard(logger, 'stopRecording', async () => engine.stopRecording()),
+  );
+
+  // Independent record during an active stream (starts/stops the loopback tap).
+  ipcMain.handle(
+    IPC.setStreamRecording,
+    guard(logger, 'setStreamRecording', async (_event, payload: unknown) => {
+      const { on } = streamRecordingRequestSchema.parse(payload);
+      await engine.setStreamRecording(on);
+      return engine.getStatus();
+    }),
   );
 
   ipcMain.handle(IPC.getStatus, () => engine.getStatus());

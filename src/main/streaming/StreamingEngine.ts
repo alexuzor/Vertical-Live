@@ -26,6 +26,8 @@ import {
   PREVIEW_CAPTURE_TARGET_HEIGHT,
   PREVIEW_CAPTURE_TARGET_WIDTH,
   PREVIEW_MIN_FRAME_INTERVAL_MS,
+  RECORD_LOOPBACK_INPUT,
+  RECORD_LOOPBACK_OUTPUT,
 } from '../../shared/constants';
 import { ERROR_MESSAGES, VerticalLiveError, isRecoverable } from '../../shared/errors';
 import type { ErrorCode } from '../../shared/errors';
@@ -62,6 +64,7 @@ import {
 import type { StreamDestination } from './FfmpegCommandBuilder';
 import {
   buildFacebookUrl,
+  buildLoopbackRecordCommand,
   buildMeterCommand,
   buildPreviewCommand,
   buildRecordingCommand,
@@ -148,6 +151,12 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
   // never restarts the video. It is independent of the state machine.
   private meterProcess: FfmpegProcess | null = null;
   private meterDeviceId: string | null = null;
+  // The independent mid-stream record process: taps the streaming loopback and
+  // copies it to a file, started/stopped without touching the live send.
+  private loopbackRecord: {
+    process: FfmpegProcess;
+    paths: { mkvPath: string; mp4Path: string };
+  } | null = null;
   private phase: StreamPhase = 'idle';
   private streamingSince: number | null = null;
   private recordingSince: number | null = null;
@@ -389,6 +398,111 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
     }
   }
 
+  /**
+   * Starts or stops recording during an active stream, independently of the
+   * Facebook send. Valid only while streaming with "record while streaming"
+   * enabled (the loopback is being published). Each start writes a fresh file
+   * from the loopback tap; each stop finalises it (MKV → MP4). The live stream is
+   * never interrupted.
+   */
+  async setStreamRecording(on: boolean): Promise<void> {
+    if (!on) {
+      await this.stopLoopbackRecord();
+      return;
+    }
+    if (this.run?.kind !== 'stream') {
+      throw new VerticalLiveError(
+        'invalid-state-transition',
+        'Recording can only be toggled during a live stream.',
+      );
+    }
+    if (this.loopbackRecord) return; // already recording
+
+    // Only possible when the stream was started with recording enabled — that is
+    // what makes the live process publish the loopback this tap reads.
+    const config = this.run.config;
+    if (!config?.recordingEnabled || !config.recordingDirectory) {
+      throw new VerticalLiveError(
+        'invalid-configuration',
+        'Turn on “Record while streaming” before going live to record.',
+      );
+    }
+    const directory = config.recordingDirectory;
+
+    await ensureWritableDirectory(directory);
+    const reserved = await reserveRecordingPaths(directory);
+    const paths = { mkvPath: reserved.mkvPath, mp4Path: reserved.mp4Path };
+
+    const proc = new FfmpegProcess({
+      executable: this.locator.requirePath(),
+      args: buildLoopbackRecordCommand(RECORD_LOOPBACK_INPUT, paths.mkvPath),
+      spawner: this.spawner,
+      onStderrLine: (line) => {
+        const match = /^total_size=(\d+)/.exec(line);
+        if (match && this.recording.phase === 'recording') {
+          this.recording = { ...this.recording, bytesWritten: Number(match[1]) };
+        }
+      },
+      onSpawn: (pid) => {
+        this.registry.add(pid);
+        this.logger.info(`Stream recording started (pid ${String(pid)}) -> ${paths.mkvPath}`);
+      },
+    });
+    proc.on('spawn-error', (error) =>
+      this.logger.error(`Stream recording could not start: ${redact(error)}`),
+    );
+    proc.on('exit', () => {
+      // Finalise if the tap died on its own. A deliberate stop nulls
+      // loopbackRecord first, so this guard prevents a double finalise.
+      if (this.loopbackRecord?.process === proc) void this.stopLoopbackRecord();
+    });
+
+    this.loopbackRecord = { process: proc, paths };
+    this.recording = {
+      phase: 'recording',
+      workingPath: paths.mkvPath,
+      finalPath: null,
+      bytesWritten: 0,
+      message: null,
+    };
+    this.recordingSince = Date.now();
+    proc.start();
+    this.emitStatus();
+  }
+
+  /** Stops the mid-stream record tap and finalises the file. Never rejects. */
+  private async stopLoopbackRecord(): Promise<void> {
+    const rec = this.loopbackRecord;
+    if (!rec) return;
+    this.loopbackRecord = null; // block re-entry from the exit handler
+
+    this.recording = { ...this.recording, phase: 'finalising', message: null };
+    this.recordingSince = null;
+    this.emitStatus();
+
+    try {
+      await rec.process.stop();
+      this.recording = await finaliseRecording({
+        mkvPath: rec.paths.mkvPath,
+        mp4Path: rec.paths.mp4Path,
+        getExecutable: () => this.locator.requirePath(),
+        onLog: (message) => this.logger.info(message),
+      });
+      this.logger.info(`Stream recording finalised: phase=${this.recording.phase}`);
+    } catch (error) {
+      this.logger.error(`Stream recording finalisation failed: ${redact(error)}`);
+      this.recording = {
+        phase: 'failed',
+        workingPath: rec.paths.mkvPath,
+        finalPath: null,
+        bytesWritten: null,
+        message: 'The recording could not be finalised.',
+      };
+    }
+    this.registry.remove(rec.process.pid);
+    this.emitStatus();
+  }
+
   async stopPreview(): Promise<void> {
     if (!this.run || this.run.kind !== 'preview') return;
     const active = this.run;
@@ -467,29 +581,22 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
     const encoder = forcedEncoder ?? (await this.chooseEncoder());
     this.activeEncoder = encoder;
 
-    let recordingPaths: { mkvPath: string; mp4Path: string } | null = null;
-    if (config.recordingEnabled) {
-      if (!config.recordingDirectory) {
-        throw new VerticalLiveError(
-          'invalid-configuration',
-          'Recording is enabled but no folder was chosen.',
-        );
-      }
-      await ensureWritableDirectory(config.recordingDirectory);
-      const reserved = await reserveRecordingPaths(config.recordingDirectory);
-      recordingPaths = { mkvPath: reserved.mkvPath, mp4Path: reserved.mp4Path };
-      this.recording = {
-        phase: 'recording',
-        workingPath: reserved.mkvPath,
-        finalPath: null,
-        bytesWritten: 0,
-        message: null,
-      };
-      this.recordingSince = Date.now();
-    } else {
-      this.recording = IDLE_RECORDING;
-      this.recordingSince = null;
+    // "Record while streaming" publishes the record-quality feed to the UDP
+    // loopback so recording can be started and stopped independently mid-stream
+    // (see setStreamRecording). Nothing is written until the user records; the
+    // live process itself keeps no file.
+    if (config.recordingEnabled && !config.recordingDirectory) {
+      throw new VerticalLiveError(
+        'invalid-configuration',
+        'Recording is enabled but no folder was chosen.',
+      );
     }
+    const recordLoopback = config.recordingEnabled && Boolean(config.recordingDirectory);
+    if (recordLoopback && config.recordingDirectory) {
+      await ensureWritableDirectory(config.recordingDirectory);
+    }
+    this.recording = IDLE_RECORDING;
+    this.recordingSince = null;
 
     // Register the key for redaction *before* it can appear anywhere.
     registerSecret(config.facebookStreamKey);
@@ -505,7 +612,8 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
       bitrateKbps: config.bitrateKbps,
       encoder,
       destination,
-      recordingPath: recordingPaths?.mkvPath ?? null,
+      recordingPath: null,
+      recordLoopbackUrl: recordLoopback ? RECORD_LOOPBACK_OUTPUT : null,
       preview: true,
       captureMode,
       synthetic: this.syntheticInput,
@@ -521,12 +629,14 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
     this.logger.debug(`FFmpeg args: ${redact(args.join(' '))}`);
 
     this.setPhase('connecting');
-    this.spawnRun('stream', args, config, encoder, captureMode, recordingPaths);
+    // The stream never writes a file itself; the record tap (setStreamRecording)
+    // does, so no recording paths are attached to the stream run.
+    this.spawnRun('stream', args, config, encoder, captureMode, null);
 
     return {
       encoder,
       captureMode,
-      recordingPath: recordingPaths?.mkvPath ?? null,
+      recordingPath: null,
       dryRun: destination.kind !== 'rtmp',
     };
   }
@@ -552,6 +662,8 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
     }
 
     active.stopping = true;
+    // Finalise any mid-stream recording before the loopback producer goes away.
+    await this.stopLoopbackRecord();
     this.machine.tryTransition('stream-stopping');
     this.setStatusMessage('Closing the connection to Facebook…');
     this.logger.info('Stopping stream (graceful quit requested).');
@@ -700,6 +812,7 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
   /** Immediate termination. Only used during an emergency app shutdown. */
   async forceStop(): Promise<void> {
     await this.stopMeter();
+    await this.stopLoopbackRecord();
     const active = this.run;
     if (!active) return;
     active.stopping = true;
@@ -714,6 +827,7 @@ export class StreamingEngine extends TypedEmitter<StreamingEngineEvents> {
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     await this.stopMeter();
+    await this.stopLoopbackRecord();
     const active = this.run;
     if (!active) return;
     try {

@@ -24,6 +24,7 @@ export const IPC = {
   stopStream: 'vl:stop-stream',
   startRecording: 'vl:start-recording',
   stopRecording: 'vl:stop-recording',
+  setStreamRecording: 'vl:set-stream-recording',
   getStatus: 'vl:get-status',
   getSystemMetrics: 'vl:get-system-metrics',
   testConnection: 'vl:test-connection',

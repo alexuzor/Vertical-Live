@@ -4,6 +4,7 @@ import { useDashboard } from '../hooks/useDashboard';
 
 import { IconFolder, IconFolderOpen } from './icons';
 import { Field, Panel } from './primitives';
+import { ToggleSwitch } from './ToggleSwitch';
 
 export function RecordingPanel() {
   const d = useDashboard();
@@ -36,6 +37,23 @@ export function RecordingPanel() {
           </span>
           Open
         </button>
+      </div>
+
+      <div className="field devices__monitoring">
+        <span className="field__label">
+          Record while streaming
+          <span className="field__hint">
+            enables start/stop of a 1080×1920 recording any time while live
+          </span>
+        </span>
+        <div className="monitoring">
+          <ToggleSwitch
+            checked={d.recordingEnabled}
+            onChange={d.setRecordingEnabled}
+            ariaLabel="Record while streaming"
+          />
+          <span className="monitoring__label">{d.recordingEnabled ? 'On' : 'Off'}</span>
+        </div>
       </div>
 
       <div className="rec__foot">

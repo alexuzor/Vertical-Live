@@ -134,6 +134,9 @@ const api: VerticalLiveApi = {
 
   stopRecording: () => ipcRenderer.invoke(IPC.stopRecording) as Promise<IpcResult<StopResult>>,
 
+  setStreamRecording: (on: boolean) =>
+    ipcRenderer.invoke(IPC.setStreamRecording, { on }) as Promise<IpcResult<StreamStatus>>,
+
   getStatus: () => ipcRenderer.invoke(IPC.getStatus) as Promise<StreamStatus>,
 
   getSystemMetrics: (recordingDirectory?: string | null) =>

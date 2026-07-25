@@ -18,7 +18,7 @@ import { useEffect } from 'react';
 // defaults (DEFAULT_WINDOW_WIDTH / DEFAULT_WINDOW_HEIGHT) so the factor is 1 at
 // the default window size.
 const DESIGN_WIDTH = 1648;
-const DESIGN_HEIGHT = 928;
+const DESIGN_HEIGHT = 1112;
 
 export function useFitToWindow(): void {
   useEffect(() => {

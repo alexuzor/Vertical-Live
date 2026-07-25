@@ -599,8 +599,14 @@ export interface BuildStreamCommandOptions {
   bitrateKbps: number;
   encoder: EncoderId;
   destination: StreamDestination;
-  /** Absolute MKV path, or null when recording is disabled. */
+  /** Absolute MKV path for an inline recording, or null. */
   recordingPath: string | null;
+  /**
+   * When set, the record-quality 1080x1920 branch is published to this UDP
+   * loopback (MPEG-TS) instead of a file, so a separate process can tap it and
+   * record independently mid-stream. Takes precedence over `recordingPath`.
+   */
+  recordLoopbackUrl?: string | null;
   /** Emit the MJPEG preview branch on stdout. */
   preview: boolean;
   captureMode: SelectedCaptureMode | null;
@@ -643,6 +649,33 @@ function buildDestinationArgs(destination: StreamDestination): string[] {
 }
 
 /**
+ * The MJPEG preview output on stdout. Identical everywhere the preview appears —
+ * preview-only, streaming, or recording — so the preview behaves the same in all
+ * three. `-flush_packets 1` is the important part: it pushes each JPEG to the
+ * pipe the instant it is muxed. Without it, while streaming, the busy H.264
+ * encoders let preview frames pool in the output buffer and the preview arrives
+ * in frozen bursts.
+ */
+function buildPreviewOutputArgs(previewLabel: string): string[] {
+  return [
+    '-map',
+    `[${previewLabel}]`,
+    '-an',
+    '-c:v',
+    'mjpeg',
+    '-q:v',
+    String(PREVIEW_MJPEG_QUALITY),
+    '-pix_fmt',
+    'yuvj420p',
+    '-flush_packets',
+    '1',
+    '-f',
+    'mjpeg',
+    'pipe:1',
+  ];
+}
+
+/**
  * Builds the complete argument vector for a live send.
  *
  * Output order is deliberate: the Facebook branch is output #0 so FFmpeg's
@@ -656,12 +689,15 @@ export function buildStreamCommand(options: BuildStreamCommandOptions): string[]
   // substituted silence, and the UI greys the meter out when monitoring is off.
   const withMeter = options.synthetic || options.microphoneDevice !== null;
 
+  // The record-quality branch feeds either an inline file or the UDP loopback.
+  const recordBranch = options.recordingPath !== null || Boolean(options.recordLoopbackUrl);
+
   const graph = buildFilterGraph(
     options.framingMode,
     options.fps,
     {
       stream: true,
-      recording: options.recordingPath !== null,
+      recording: recordBranch,
       preview: options.preview,
     },
     { audio: audioEnabled, meter: withMeter, noiseSuppression: options.noiseSuppression },
@@ -706,8 +742,8 @@ export function buildStreamCommand(options: BuildStreamCommandOptions): string[]
   args.push('-max_muxing_queue_size', '1024');
   args.push(...buildDestinationArgs(options.destination));
 
-  /* --- Output 1: local recording (MKV, crash resistant) ----------- */
-  if (options.recordingPath && graph.labels.recording) {
+  /* --- Output 1: record-quality 1080x1920 (file, or UDP loopback) - */
+  if (recordBranch && graph.labels.recording) {
     args.push('-map', `[${graph.labels.recording}]`);
     if (graph.labels.recordingAudio) args.push('-map', `[${graph.labels.recordingAudio}]`);
     args.push(
@@ -721,14 +757,18 @@ export function buildStreamCommand(options: BuildStreamCommandOptions): string[]
     );
     args.push(...buildAudioEncoderArgs(RECORDING_AUDIO_BITRATE_KBPS));
     args.push('-max_muxing_queue_size', '1024');
-    args.push('-f', 'matroska', options.recordingPath);
+    if (options.recordLoopbackUrl) {
+      // Publish to the loopback so an independent process can tap it. `mpegts`
+      // repeats SPS/PPS so a mid-stream tap resyncs within one GOP.
+      args.push('-f', 'mpegts', options.recordLoopbackUrl);
+    } else if (options.recordingPath) {
+      args.push('-f', 'matroska', options.recordingPath);
+    }
   }
 
   /* --- Output 2: MJPEG preview on stdout -------------------------- */
   if (options.preview && graph.labels.preview) {
-    args.push('-map', `[${graph.labels.preview}]`, '-an');
-    args.push('-c:v', 'mjpeg', '-q:v', String(PREVIEW_MJPEG_QUALITY), '-pix_fmt', 'yuvj420p');
-    args.push('-f', 'mjpeg', 'pipe:1');
+    args.push(...buildPreviewOutputArgs(graph.labels.preview));
   }
 
   /* --- Output 3: metering sink (ebur128 -> discarded) ------------- */
@@ -766,7 +806,7 @@ export function buildPreviewCommand(options: BuildPreviewCommandOptions): string
     { audio: false },
   );
 
-  return [
+  const args = [
     ...buildGlobalArgs(),
     ...buildVideoInputArgs({
       deviceName: options.cameraDevice,
@@ -777,24 +817,9 @@ export function buildPreviewCommand(options: BuildPreviewCommandOptions): string
     }),
     '-filter_complex',
     graph.filterComplex,
-    // The MJPEG preview image on stdout.
-    '-map',
-    `[${graph.labels.preview}]`,
-    '-an',
-    '-c:v',
-    'mjpeg',
-    '-q:v',
-    String(PREVIEW_MJPEG_QUALITY),
-    '-pix_fmt',
-    'yuvj420p',
-    // Push each JPEG to the pipe the instant it is muxed instead of letting it
-    // sit in the output buffer, so the renderer sees frames without added delay.
-    '-flush_packets',
-    '1',
-    '-f',
-    'mjpeg',
-    'pipe:1',
   ];
+  if (graph.labels.preview) args.push(...buildPreviewOutputArgs(graph.labels.preview));
+  return args;
 }
 
 export interface BuildMeterCommandOptions {
@@ -909,9 +934,7 @@ export function buildRecordingCommand(options: BuildRecordingCommandOptions): st
 
   /* --- Output 1: MJPEG preview on stdout -------------------------- */
   if (options.preview && graph.labels.preview) {
-    args.push('-map', `[${graph.labels.preview}]`, '-an');
-    args.push('-c:v', 'mjpeg', '-q:v', String(PREVIEW_MJPEG_QUALITY), '-pix_fmt', 'yuvj420p');
-    args.push('-f', 'mjpeg', 'pipe:1');
+    args.push(...buildPreviewOutputArgs(graph.labels.preview));
   }
 
   /* --- Output 2: metering sink (ebur128 -> discarded) ------------- */
@@ -920,6 +943,35 @@ export function buildRecordingCommand(options: BuildRecordingCommandOptions): st
   }
 
   return args;
+}
+
+/**
+ * The independent mid-stream record process.
+ *
+ * Taps the streaming loopback and stream-copies (no re-encode) the full
+ * 1080x1920 record-quality feed to an MKV. It joins the live MPEG-TS mid-stream,
+ * begins at the first keyframe (≤ one GOP), and can be started or stopped at any
+ * moment without disturbing the Facebook send — the vMix-style independence a
+ * single FFmpeg process cannot provide. `-progress` drives the byte counter;
+ * `error` loglevel hides the benign SPS/PPS resync notices of a mid-stream tap.
+ */
+export function buildLoopbackRecordCommand(loopbackUrl: string, mkvPath: string): string[] {
+  return [
+    '-hide_banner',
+    '-nostats',
+    '-loglevel',
+    'error',
+    '-progress',
+    'pipe:2',
+    // Bound the wait for the producer so a missing stream fails fast, never hangs.
+    '-i',
+    `${loopbackUrl}${loopbackUrl.includes('?') ? '&' : '?'}timeout=5000000`,
+    '-c',
+    'copy',
+    '-f',
+    'matroska',
+    mkvPath,
+  ];
 }
 
 /* ------------------------------------------------------------------ */

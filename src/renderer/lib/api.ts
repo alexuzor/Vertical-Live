@@ -301,6 +301,7 @@ function createMockApi(): VerticalLiveApi {
         }),
         400,
       ),
+    setStreamRecording: () => Promise.resolve(ok(MOCK_STATUS)),
     getStatus: () => Promise.resolve(MOCK_STATUS),
     getSystemMetrics: () =>
       Promise.resolve<SystemMetrics>({

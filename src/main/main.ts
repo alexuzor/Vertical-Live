@@ -53,7 +53,6 @@ let updateService: UpdateService | null = null;
 // binary frames never contend with ordinary command/status IPC.
 let previewPort: MessagePortMain | null = null;
 let confirmedQuit = false;
-let saveBoundsTimer: NodeJS.Timeout | null = null;
 
 /* -------------------------------------------------------------------- */
 /* Single instance                                                       */
@@ -135,7 +134,8 @@ async function bootstrap(): Promise<void> {
   /* ---- Storage ------------------------------------------------- */
 
   settingsStore = new SettingsStore({ directory: userDataPath, logger });
-  const settings = await settingsStore.load();
+  // Prime the store from disk; the window no longer restores persisted bounds.
+  await settingsStore.load();
 
   const credentials = new CredentialStore({
     directory: userDataPath,
@@ -184,7 +184,6 @@ async function bootstrap(): Promise<void> {
     preloadPath: resolvePreloadPath(APP_OUT_DIR),
     devServerUrl,
     indexHtmlPath: resolveIndexHtmlPath(APP_OUT_DIR),
-    savedBounds: settings.windowBounds,
     workArea,
     icon: existsSync(iconPath) ? iconPath : undefined,
   });
@@ -310,18 +309,8 @@ function establishPreviewPort(window: BrowserWindow): void {
 function wireWindowEvents(window: BrowserWindow): void {
   window.webContents.on('did-finish-load', () => establishPreviewPort(window));
 
-  const persistBounds = (): void => {
-    if (!settingsStore || window.isDestroyed() || window.isMinimized()) return;
-    const { x, y, width, height } = window.getNormalBounds();
-    if (saveBoundsTimer) clearTimeout(saveBoundsTimer);
-    saveBoundsTimer = setTimeout(() => {
-      void settingsStore?.update({ windowBounds: { x, y, width, height } });
-    }, 500);
-    saveBoundsTimer.unref?.();
-  };
-
-  window.on('resize', persistBounds);
-  window.on('move', persistBounds);
+  // The window always opens at the centred 1230x830 default, so its size/position
+  // are deliberately not persisted across sessions.
 
   // Keep the custom title-bar maximise/restore glyph in sync with the OS.
   const emitMaximized = (maximized: boolean): void => {
